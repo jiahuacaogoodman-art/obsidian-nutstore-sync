@@ -35,4 +35,18 @@ export const openAIProviderResolver: AIProviderResolver = {
 			providerName: provider.name || 'OpenAI',
 		}
 	},
+	createImageModel(provider, modelId) {
+		assertProviderUsable(provider)
+		const factory = createOpenAI({
+			name: provider.name || 'openai',
+			baseURL: provider.api,
+			apiKey: provider.apiKey,
+			fetch: obsidianFetch,
+		})
+
+		return {
+			model: factory.image(modelId),
+			providerName: provider.name || 'OpenAI',
+		}
+	},
 }

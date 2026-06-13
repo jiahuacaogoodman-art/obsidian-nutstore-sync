@@ -1,10 +1,17 @@
 import type {
 	GenerateTextResult,
+	ImageModelUsage,
 	LanguageModelResponseMetadata,
 	LanguageModelUsage,
 	ModelMessage,
 } from 'ai'
-import { tool as aiTool, generateText, stepCountIs, streamText } from 'ai'
+import {
+	tool as aiTool,
+	generateImage,
+	generateText,
+	stepCountIs,
+	streamText,
+} from 'ai'
 import { getInterleavedMessageField } from './interleaved-message-field'
 import { getProviderResolver } from './providers/registry'
 import {
@@ -29,6 +36,13 @@ export interface GenerateAssistantTurnRequest {
 export interface GenerateAssistantTurnResult {
 	message: AIMessage
 	meta: AIMessageMeta
+}
+
+export interface GenerateImageTurnResult {
+	contentBase64: string
+	mediaType: string
+	meta: AIMessageMeta
+	prompt: string
 }
 
 function toTextParts(text?: string | null): AIMessageContentPart[] | null {
@@ -194,6 +208,72 @@ function toMeta(params: {
 	} satisfies AIMessageMeta
 }
 
+function toImageMeta(params: {
+	provider: AIProviderConfig
+	providerName: string
+	modelName: string
+	usage?: ImageModelUsage
+}) {
+	const usage = params.usage as
+		| {
+				inputTokens?: number
+				outputTokens?: number
+				totalTokens?: number
+				tokens?: number
+		  }
+		| undefined
+
+	return {
+		providerId: params.provider.id,
+		providerName: params.provider.name || params.providerName,
+		modelName: params.modelName,
+		usage: {
+			inputTokens: usage?.inputTokens ?? usage?.tokens,
+			outputTokens: usage?.outputTokens,
+			totalTokens: usage?.totalTokens ?? usage?.tokens,
+		},
+	} satisfies AIMessageMeta
+}
+
+function getLastUserMessage(messages: AIMessage[]) {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index]
+		if (message.role === 'user') {
+			return message
+		}
+	}
+	return undefined
+}
+
+function toImagePrompt(message: AIMessage | undefined) {
+	if (!message) {
+		return ''
+	}
+
+	const text = (message.content || [])
+		.filter(
+			(part): part is Extract<AIMessageContentPart, { type: 'text' }> =>
+				part.type === 'text',
+		)
+		.map((part) => part.text)
+		.join('\n')
+		.trim()
+
+	const images = (message.content || [])
+		.filter(
+			(part): part is Extract<AIMessageContentPart, { type: 'image_url' }> =>
+				part.type === 'image_url',
+		)
+		.map((part) => part.image_url.url)
+
+	return images.length
+		? {
+				text,
+				images,
+			}
+		: text
+}
+
 export function assertProviderUsable(provider: AIProviderConfig) {
 	getProviderResolver(provider).assertUsable(provider)
 }
@@ -295,6 +375,46 @@ export async function streamAssistantTurn(
 			providerName,
 			modelName,
 			usage,
+		}),
+	}
+}
+
+export async function generateImageTurn(
+	request: Omit<GenerateAssistantTurnRequest, 'tools' | 'onTextDelta'>,
+): Promise<GenerateImageTurnResult> {
+	const resolver = getProviderResolver(request.provider)
+	if (!resolver.createImageModel) {
+		throw new Error('The selected provider does not support image generation.')
+	}
+
+	const modelName =
+		request.provider.models[request.model]?.name?.trim() || request.model
+	const { model, providerName } = resolver.createImageModel(
+		request.provider as never,
+		request.model,
+	)
+	const lastUserMessage = getLastUserMessage(request.messages)
+	const prompt = toImagePrompt(lastUserMessage)
+	if (!prompt || (typeof prompt === 'object' && !prompt.text && !prompt.images.length)) {
+		throw new Error('Enter an image prompt before generating an image.')
+	}
+
+	const result = await generateImage({
+		model,
+		prompt,
+		n: 1,
+	})
+	const image = result.image
+
+	return {
+		contentBase64: image.base64,
+		mediaType: image.mediaType || 'image/png',
+		prompt: typeof prompt === 'string' ? prompt : prompt.text || '',
+		meta: toImageMeta({
+			provider: request.provider,
+			providerName,
+			modelName,
+			usage: result.usage,
 		}),
 	}
 }

@@ -8,7 +8,11 @@ import {
 	resolveInitialSelection,
 } from '~/ai/config'
 import { createPermissionGuard } from '~/ai/permission-guard'
-import { assertProviderUsable, generateAssistantTurn } from '~/ai/runtime'
+import {
+	assertProviderUsable,
+	generateAssistantTurn,
+	generateImageTurn,
+} from '~/ai/runtime'
 import {
 	REPEATED_TOOL_CALL_THRESHOLD,
 	ToolCallRepeatState,
@@ -62,6 +66,7 @@ const MAX_TASK_DEPTH = 2
 const MAX_CONCURRENT_TASKS_PER_SESSION = 3
 const CHAT_META_KEY = 'chat_meta'
 const CHAT_INDEX_KEY = 'chat_index'
+const AI_GENERATED_IMAGES_DIR = 'AI Generated Images'
 const INTERRUPTED_TASK_CANCEL_REASON = 'interrupted_by_restart'
 const INTERRUPTED_TASK_FAILURE_STAGE = 'interrupted_by_restart'
 const COMPRESSION_PROMPT = [
@@ -188,6 +193,47 @@ function decodeBase64ToArrayBuffer(contentBase64: string) {
 		bytes.byteOffset,
 		bytes.byteOffset + bytes.byteLength,
 	) as ArrayBuffer
+}
+
+function getImageExtension(mediaType: string) {
+	switch (mediaType.toLowerCase()) {
+		case 'image/jpeg':
+		case 'image/jpg':
+			return 'jpg'
+		case 'image/webp':
+			return 'webp'
+		case 'image/gif':
+			return 'gif'
+		default:
+			return 'png'
+	}
+}
+
+function isImageGenerationModel(model: {
+	id: string
+	modalities?: { output?: string[] }
+}) {
+	const id = model.id.toLowerCase()
+	return (
+		model.modalities?.output?.includes('image') ||
+		id.startsWith('gpt-image') ||
+		id.startsWith('dall-e') ||
+		id.includes('image-generation')
+	)
+}
+
+function createTimestampSlug() {
+	const date = new Date()
+	const pad = (value: number) => String(value).padStart(2, '0')
+	return [
+		date.getFullYear(),
+		pad(date.getMonth() + 1),
+		pad(date.getDate()),
+		'-',
+		pad(date.getHours()),
+		pad(date.getMinutes()),
+		pad(date.getSeconds()),
+	].join('')
 }
 
 function isVaultFolder(
@@ -1319,6 +1365,49 @@ export default class ChatService {
 				session.updatedAt = Date.now()
 				this.notify()
 
+				if (isImageGenerationModel(model)) {
+					const response = await generateImageTurn({
+						provider,
+						model: model.id,
+						messages: requestMessages,
+						...session.inferenceParams,
+					})
+
+					if (this.deletedSessionIds.has(session.id)) {
+						runtime.stopRequested = false
+						runtime.runState = 'idle'
+						return
+					}
+
+					const imagePath = await this.saveGeneratedImage(
+						response.contentBase64,
+						response.mediaType,
+					)
+					streamingRecord.message = {
+						role: 'assistant',
+						content: [
+							{
+								type: 'text',
+								text: `Generated image saved to ${imagePath}`,
+							},
+							{
+								type: 'image_url',
+								image_url: {
+									url: this.plugin.app.vault.getResourcePath(imagePath as never),
+								},
+							},
+						],
+					}
+					streamingRecord.meta = { ...response.meta, modelId: model.id }
+					fragment.updatedAt = Date.now()
+					session.updatedAt = Date.now()
+					runtime.runState = 'idle'
+					runtime.stopRequested = false
+					await this.persistSession(session)
+					this.notify()
+					continue
+				}
+
 				const response = await generateAssistantTurn({
 					provider,
 					model: model.id,
@@ -2182,6 +2271,25 @@ export default class ChatService {
 			throw new Error(`Unable to restore ${path}: a file already exists there.`)
 		}
 		await this.plugin.app.vault.createFolder(path)
+	}
+
+	private async saveGeneratedImage(contentBase64: string, mediaType: string) {
+		await this.ensureVaultDirectory(AI_GENERATED_IMAGES_DIR)
+		const data = decodeBase64ToArrayBuffer(contentBase64)
+		const extension = getImageExtension(mediaType)
+		const baseName = `image-${createTimestampSlug()}`
+		let path = normalizePath(
+			`${AI_GENERATED_IMAGES_DIR}/${baseName}.${extension}`,
+		)
+		let suffix = 1
+		while (this.plugin.app.vault.getAbstractFileByPath(path)) {
+			path = normalizePath(
+				`${AI_GENERATED_IMAGES_DIR}/${baseName}-${suffix}.${extension}`,
+			)
+			suffix += 1
+		}
+		await this.plugin.app.vault.createBinary(path, data)
+		return path
 	}
 
 	private async writeVaultFile(path: string, contentBase64: string) {
