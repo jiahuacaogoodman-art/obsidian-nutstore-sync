@@ -371,6 +371,72 @@ describe('ChatService fragment workflows', () => {
 		expect(service.getViewProps().pendingMessages).toHaveLength(0)
 	})
 
+	it('sends image attachments as user message content parts', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Image received' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		await service.sendMessage({
+			text: 'Describe this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'image.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		const session = getActiveSession(service)
+		const userMessage = session.fragments[0].messages[0].message
+		expect(userMessage.content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual(
+			userMessage.content,
+		)
+	})
+
+	it('updates the assistant message while text is streaming', async () => {
+		generateAssistantTurn.mockImplementationOnce(async (request) => {
+			await request.onTextDelta?.('Hel', 'Hel')
+			await request.onTextDelta?.('lo', 'Hello')
+			return {
+				message: {
+					role: 'assistant',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+				meta: {
+					providerId: 'provider-1',
+					providerName: 'Provider',
+					modelName: 'model-a',
+				},
+			}
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		await service.sendMessage('Stream please')
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content?.[0]).toEqual({
+			type: 'text',
+			text: 'Hello',
+		})
+	})
+
 	it('persists interleaved assistant fields on the message and forwards them on every subsequent turn', async () => {
 		const plugin = createPlugin() as any
 		plugin.settings.ai.providers['provider-1'].models['model-1'].interleaved = {

@@ -15,7 +15,20 @@ export function PendingList(props: {
 					<For each={props.pendingMessages}>
 						{(message) => (
 							<div class="rounded-2 bg-[var(--background-secondary)] p-3 text-sm text-[var(--text-normal)] whitespace-pre-wrap break-words select-text">
-								{message.text}
+								<Show when={message.text}>{message.text}</Show>
+								<Show when={message.attachments?.length}>
+									<div class="mt-2 flex gap-2 overflow-x-auto pb-1 scrollbar-default">
+										<For each={message.attachments || []}>
+											{(attachment) => (
+												<img
+													class="h-14 w-14 shrink-0 rounded-2 border border-[var(--background-modifier-border)] object-cover"
+													src={attachment.url}
+													alt={attachment.name}
+												/>
+											)}
+										</For>
+									</div>
+								</Show>
 							</div>
 						)}
 					</For>
