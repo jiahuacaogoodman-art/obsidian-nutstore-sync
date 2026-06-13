@@ -166,8 +166,10 @@ function createPluginWithVault(initialFiles: Record<string, string> = {}) {
 			app: {
 				vault: {
 					getAbstractFileByPath,
-					getResourcePath(path: string) {
-						return `app://local/${path}`
+					adapter: {
+						getResourcePath(path: string) {
+							return `app://local/${path}`
+						},
 					},
 					async createFolder(path: string) {
 						ensureFolder(path)
@@ -484,7 +486,9 @@ describe('ChatService fragment workflows', () => {
 		})
 		expect(assistantMessage.content?.[1]).toEqual({
 			type: 'image_url',
-			image_url: { url: `app://local/${generatedPath}` },
+			image_url: {
+				url: `data:image/png;base64,${Buffer.from('png-bytes').toString('base64')}`,
+			},
 		})
 		expect(generateAssistantTurn).not.toHaveBeenCalled()
 		expect(generateImageTurn).toHaveBeenCalledWith(

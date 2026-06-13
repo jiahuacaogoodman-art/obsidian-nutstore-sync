@@ -1393,7 +1393,7 @@ export default class ChatService {
 							{
 								type: 'image_url',
 								image_url: {
-									url: this.plugin.app.vault.getResourcePath(imagePath as never),
+									url: `data:${response.mediaType};base64,${response.contentBase64}`,
 								},
 							},
 						],
@@ -1405,7 +1405,7 @@ export default class ChatService {
 					runtime.stopRequested = false
 					await this.persistSession(session)
 					this.notify()
-					continue
+					return
 				}
 
 				const response = await generateAssistantTurn({
