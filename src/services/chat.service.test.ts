@@ -380,7 +380,7 @@ describe('ChatService fragment workflows', () => {
 		expect(service.getViewProps().pendingMessages).toHaveLength(0)
 	})
 
-	it('sends image attachments as user message content parts', async () => {
+	it('stores image attachments and omits them for text-only models', async () => {
 		generateAssistantTurn.mockResolvedValueOnce({
 			message: {
 				role: 'assistant',
@@ -412,9 +412,46 @@ describe('ChatService fragment workflows', () => {
 			{ type: 'text', text: 'Describe this' },
 			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
 		])
-		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual(
-			userMessage.content,
-		)
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+		])
+	})
+
+	it('sends latest image attachments to image-capable chat models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Image received' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const plugin = createPlugin() as any
+		plugin.settings.ai.providers['provider-1'].models['model-1'].modalities = {
+			input: ['text', 'image'],
+			output: ['text'],
+		}
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage({
+			text: 'Describe this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'image.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
 	})
 
 	it('updates the assistant message while text is streaming', async () => {
@@ -487,6 +524,54 @@ describe('ChatService fragment workflows', () => {
 		)
 		expect(assistantHistory.content).toEqual([
 			{ type: 'text', text: 'Generated image saved to image.png' },
+		])
+	})
+
+	it('does not replay user image attachments to text-only models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Continued' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		const session = getActiveSession(service)
+		session.fragments[0].messages.push(
+			(service as any).createMessageRecord({
+				role: 'user',
+				content: [
+					{ type: 'text', text: 'Describe this old image' },
+					{
+						type: 'image_url',
+						image_url: { url: 'data:image/png;base64,AAAA' },
+					},
+				],
+			}),
+			(service as any).createMessageRecord({
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Old image description' }],
+			}),
+		)
+
+		await service.sendMessage('Now talk normally')
+
+		const requestMessages = generateAssistantTurn.mock.calls[0][0].messages
+		const oldUser = requestMessages.find(
+			(message: any) =>
+				message.role === 'user' &&
+				message.content?.some?.(
+					(part: any) => part.type === 'text' && part.text.includes('old image'),
+				),
+		)
+		expect(oldUser.content).toEqual([
+			{ type: 'text', text: 'Describe this old image' },
 		])
 	})
 

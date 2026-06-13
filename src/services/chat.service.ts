@@ -147,6 +147,40 @@ function stripAssistantImageParts(message: AIMessage): AIMessage {
 	}
 }
 
+function stripImageParts(message: AIMessage): AIMessage {
+	if (!('content' in message) || !message.content?.length) {
+		return message
+	}
+	return {
+		...message,
+		content: message.content.filter((part) => part.type !== 'image_url'),
+	} as AIMessage
+}
+
+function modelSupportsImageInput(model: { modalities?: { input?: string[] } }) {
+	return model.modalities?.input?.includes('image') ?? false
+}
+
+function keepOnlyLatestUserImages(messages: AIMessage[]) {
+	let latestUserIndex = -1
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		if (messages[index].role === 'user') {
+			latestUserIndex = index
+			break
+		}
+	}
+
+	return messages.map((message, index) => {
+		if (message.role === 'assistant') {
+			return stripAssistantImageParts(message)
+		}
+		if (message.role === 'user' && index !== latestUserIndex) {
+			return stripImageParts(message)
+		}
+		return message
+	})
+}
+
 function getAssistantToolCalls(message: ChatMessage) {
 	return message.role === 'assistant' ? message.tool_calls : undefined
 }
@@ -1364,10 +1398,13 @@ export default class ChatService {
 				this.notify()
 
 				const tools = this.createToolsForContext(session, 0, MAX_TASK_DEPTH)
-				const requestMessages = this.buildMessagesForFragment(
-					fragment,
-					session,
-				).map(stripAssistantImageParts)
+				const isImageModel = isImageGenerationModel(model)
+				const fragmentMessages = this.buildMessagesForFragment(fragment, session)
+				const requestMessages = isImageModel
+					? fragmentMessages
+					: modelSupportsImageInput(model)
+						? keepOnlyLatestUserImages(fragmentMessages)
+						: fragmentMessages.map(stripImageParts)
 				let lastStreamPersistedAt = 0
 				const streamingRecord = this.createMessageRecord({
 					role: 'assistant',
@@ -1378,7 +1415,7 @@ export default class ChatService {
 				session.updatedAt = Date.now()
 				this.notify()
 
-				if (isImageGenerationModel(model)) {
+				if (isImageModel) {
 					const response = await generateImageTurn({
 						provider,
 						model: model.id,
