@@ -137,6 +137,16 @@ function messageToText(message: Pick<ChatMessage, 'content'> | AIMessage) {
 		.join('\n')
 }
 
+function stripAssistantImageParts(message: AIMessage): AIMessage {
+	if (message.role !== 'assistant' || !message.content?.length) {
+		return message
+	}
+	return {
+		...message,
+		content: message.content.filter((part) => part.type !== 'image_url'),
+	}
+}
+
 function getAssistantToolCalls(message: ChatMessage) {
 	return message.role === 'assistant' ? message.tool_calls : undefined
 }
@@ -1354,7 +1364,10 @@ export default class ChatService {
 				this.notify()
 
 				const tools = this.createToolsForContext(session, 0, MAX_TASK_DEPTH)
-				const requestMessages = this.buildMessagesForFragment(fragment, session)
+				const requestMessages = this.buildMessagesForFragment(
+					fragment,
+					session,
+				).map(stripAssistantImageParts)
 				let lastStreamPersistedAt = 0
 				const streamingRecord = this.createMessageRecord({
 					role: 'assistant',

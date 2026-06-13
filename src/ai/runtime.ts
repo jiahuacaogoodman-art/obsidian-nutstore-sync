@@ -58,7 +58,7 @@ function toModelMessages(messages: AIMessage[]): ModelMessage[] {
 			case 'system':
 				return {
 					role: 'system',
-					content: message.content
+					content: (message.content || [])
 						.filter(
 							(
 								part: AIMessageContentPart,
@@ -91,10 +91,18 @@ function toModelMessages(messages: AIMessage[]): ModelMessage[] {
 			}
 			case 'assistant': {
 				const content = [
-					...(message.content || []).map((part: AIMessageContentPart) => ({
-						type: 'text' as const,
-						text: part.type === 'text' ? part.text : JSON.stringify(part),
-					})),
+					...(message.content || []).flatMap((part: AIMessageContentPart) => {
+						if (part.type === 'image_url') {
+							return []
+						}
+						return [
+							{
+								type: 'text' as const,
+								text:
+									part.type === 'text' ? part.text : JSON.stringify(part.value),
+							},
+						]
+					}),
 					...(message.tool_calls || []).map((toolCall: AIToolCall) => ({
 						type: 'tool-call' as const,
 						toolCallId: toolCall.id,

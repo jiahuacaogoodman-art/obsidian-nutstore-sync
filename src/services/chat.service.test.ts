@@ -446,6 +446,50 @@ describe('ChatService fragment workflows', () => {
 		})
 	})
 
+	it('does not replay generated assistant image data to text models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Continued' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		const session = getActiveSession(service)
+		session.fragments[0].messages.push(
+			(service as any).createMessageRecord({
+				role: 'user',
+				content: [{ type: 'text', text: 'Draw a thing' }],
+			}),
+			(service as any).createMessageRecord({
+				role: 'assistant',
+				content: [
+					{ type: 'text', text: 'Generated image saved to image.png' },
+					{
+						type: 'image_url',
+						image_url: { url: 'data:image/png;base64,AAAA' },
+					},
+				],
+			}),
+		)
+
+		await service.sendMessage('Now talk normally')
+
+		const requestMessages = generateAssistantTurn.mock.calls[0][0].messages
+		const assistantHistory = requestMessages.find(
+			(message: any) => message.role === 'assistant',
+		)
+		expect(assistantHistory.content).toEqual([
+			{ type: 'text', text: 'Generated image saved to image.png' },
+		])
+	})
+
 	it('generates images with image models and stores them in the vault', async () => {
 		generateImageTurn.mockResolvedValueOnce({
 			contentBase64: Buffer.from('png-bytes').toString('base64'),
