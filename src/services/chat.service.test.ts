@@ -41,13 +41,16 @@ const storageState = vi.hoisted(() => {
 	}
 })
 
-const { generateAssistantTurn, assertProviderUsable } = vi.hoisted(() => ({
+const { generateAssistantTurn, generateImageTurn, assertProviderUsable } =
+	vi.hoisted(() => ({
 	generateAssistantTurn: vi.fn(),
+	generateImageTurn: vi.fn(),
 	assertProviderUsable: vi.fn(),
 }))
 
 vi.mock('~/ai/runtime', () => ({
 	generateAssistantTurn,
+	generateImageTurn,
 	assertProviderUsable,
 }))
 
@@ -163,6 +166,9 @@ function createPluginWithVault(initialFiles: Record<string, string> = {}) {
 			app: {
 				vault: {
 					getAbstractFileByPath,
+					getResourcePath(path: string) {
+						return `app://local/${path}`
+					},
 					async createFolder(path: string) {
 						ensureFolder(path)
 						return getAbstractFileByPath(path)
@@ -267,6 +273,7 @@ function getLoadedSession(service: ChatService, sessionId: string) {
 describe('ChatService fragment workflows', () => {
 	beforeEach(() => {
 		generateAssistantTurn.mockReset()
+		generateImageTurn.mockReset()
 		assertProviderUsable.mockReset()
 		storageState.reset()
 	})
@@ -435,6 +442,56 @@ describe('ChatService fragment workflows', () => {
 			type: 'text',
 			text: 'Hello',
 		})
+	})
+
+	it('generates images with image models and stores them in the vault', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: Buffer.from('png-bytes').toString('base64'),
+			mediaType: 'image/png',
+			prompt: 'Draw a moon gate',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault()
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
+			id: 'gpt-image-2',
+			name: 'gpt-image-2',
+		}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Draw a moon gate')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toBeTruthy()
+		expect(files.get(generatedPath!)).toBe('png-bytes')
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content?.[0]).toEqual({
+			type: 'text',
+			text: `Generated image saved to ${generatedPath}`,
+		})
+		expect(assistantMessage.content?.[1]).toEqual({
+			type: 'image_url',
+			image_url: { url: `app://local/${generatedPath}` },
+		})
+		expect(generateAssistantTurn).not.toHaveBeenCalled()
+		expect(generateImageTurn).toHaveBeenCalledWith(
+			expect.objectContaining({
+				model: 'gpt-image-2',
+			}),
+		)
 	})
 
 	it('persists interleaved assistant fields on the message and forwards them on every subsequent turn', async () => {

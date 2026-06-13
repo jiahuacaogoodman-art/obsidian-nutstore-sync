@@ -1,8 +1,13 @@
-import type { LanguageModel } from 'ai'
+import type { ImageModel, LanguageModel } from 'ai'
 import type { AIMessage, AIProviderConfig } from '~/ai/types'
 
 export interface ResolvedLanguageModel {
 	model: LanguageModel
+	providerName: string
+}
+
+export interface ResolvedImageModel {
+	model: ImageModel
 	providerName: string
 }
 
@@ -16,4 +21,8 @@ export interface AIProviderResolver {
 			interleavedField?: string
 		},
 	) => ResolvedLanguageModel
+	createImageModel?: (
+		provider: AIProviderConfig,
+		modelId: string,
+	) => ResolvedImageModel
 }
