@@ -17,6 +17,7 @@ import { SessionHistoryItem } from './components/SessionHistoryItem'
 import { TasksPanel } from './components/TasksPanel'
 import { t } from './i18n'
 import type {
+	ChatImageAttachment,
 	ChatTimelineFragmentItem,
 	ChatTimelineMessageItem,
 	ChatboxProps,
@@ -35,6 +36,7 @@ const DESKTOP_INPUT_MAX_VIEWPORT_RATIO = 0.6
 
 function App(props: AppProps) {
 	const [input, setInput] = createSignal('')
+	const [attachments, setAttachments] = createSignal<ChatImageAttachment[]>([])
 	const [isComposing, setIsComposing] = createSignal(false)
 	const [historyOpen, setHistoryOpen] = createSignal(false)
 	const [tasksOpen, setTasksOpen] = createSignal(false)
@@ -49,7 +51,10 @@ function App(props: AppProps) {
 		createSignal<ChatTimelineMessageItem>()
 	const [desktopResizeEnabled, setDesktopResizeEnabled] = createSignal(false)
 	const [inputPaneHeight, setInputPaneHeight] = createSignal<number>()
+	const [temperatureInput, setTemperatureInput] = createSignal('0.7')
+	const [maxTokensInput, setMaxTokensInput] = createSignal('1200')
 	let messagesEl: HTMLDivElement | undefined
+	let fileInputEl: HTMLInputElement | undefined
 	let splitLayoutEl: HTMLDivElement | undefined
 	let inputPaneEl: HTMLDivElement | undefined
 	let historyEl: HTMLDivElement | undefined
@@ -65,6 +70,9 @@ function App(props: AppProps) {
 			.length +
 		props.otherSessionTasks.filter((task) => task.status === 'running').length
 	const isBusy = () => props.runState !== 'idle'
+	const canAttachImages = () => !!props.selectedModelId
+	const currentTemperature = () => props.inferenceParams?.temperature ?? 0.7
+	const currentMaxTokens = () => props.inferenceParams?.maxTokens ?? 1200
 	const selectedProvider = () =>
 		props.providers.find((provider) => provider.id === props.selectedProviderId)
 	const modelPickerLabel = () => {
@@ -257,14 +265,94 @@ function App(props: AppProps) {
 		onCleanup(() => window.removeEventListener('resize', onResize))
 	})
 
+	createEffect(() => {
+		setTemperatureInput(String(currentTemperature()))
+		setMaxTokensInput(String(currentMaxTokens()))
+	})
+
+	function updateInferenceParams(next: {
+		temperature?: number
+		maxTokens?: number
+	}) {
+		props.onUpdateInferenceParams?.({
+			temperature: Number.isFinite(next.temperature)
+				? Math.min(Math.max(next.temperature!, 0), 2)
+				: currentTemperature(),
+			maxTokens: Number.isFinite(next.maxTokens)
+				? Math.min(Math.max(Math.round(next.maxTokens!), 128), 32000)
+				: currentMaxTokens(),
+		})
+	}
+
 	async function submit() {
 		const text = input().trim()
-		if (!text || !props.canSend) {
+		const selectedAttachments = attachments()
+		if ((!text && selectedAttachments.length === 0) || !props.canSend) {
 			return
 		}
 		setInput('')
+		setAttachments([])
 		scrollMessagesToBottom('auto')
-		await props.onSendMessage(text)
+		await props.onSendMessage({
+			text,
+			attachments: selectedAttachments,
+		})
+	}
+
+	function readImageFile(file: File) {
+		return new Promise<ChatImageAttachment>((resolve, reject) => {
+			const reader = new FileReader()
+			reader.onload = () => {
+				if (typeof reader.result !== 'string') {
+					reject(new Error(t('imageReadFailed')))
+					return
+				}
+				resolve({
+					id: `${file.name}-${file.size}-${file.lastModified}-${Math.random()
+						.toString(36)
+						.slice(2)}`,
+					name: file.name || t('imageAttachment') || 'Image',
+					url: reader.result,
+				})
+			}
+			reader.onerror = () => reject(reader.error || new Error(t('imageReadFailed')))
+			reader.readAsDataURL(file)
+		})
+	}
+
+	async function addImageFiles(files: ArrayLike<File>) {
+		if (!canAttachImages()) {
+			return
+		}
+		const imageFiles = Array.from(files).filter((file) =>
+			file.type.startsWith('image/'),
+		)
+		if (!imageFiles.length) {
+			return
+		}
+		const nextAttachments = await Promise.all(imageFiles.map(readImageFile))
+		setAttachments((current) => [...current, ...nextAttachments])
+	}
+
+	function removeAttachment(id: string) {
+		setAttachments((current) => current.filter((item) => item.id !== id))
+	}
+
+	function onPaste(event: ClipboardEvent) {
+		const files = event.clipboardData?.files
+		if (!files?.length) {
+			return
+		}
+		void addImageFiles(files)
+	}
+
+	function onDrop(event: DragEvent) {
+		const files = event.dataTransfer?.files
+		if (!files?.length) {
+			return
+		}
+		event.preventDefault()
+		void addImageFiles(files)
 	}
 
 	async function confirmDeleteSession() {
@@ -425,7 +513,7 @@ function App(props: AppProps) {
 							<div class="truncate">{modelPickerLabel()}</div>
 						</button>
 						<Show when={modelPickerOpen()}>
-							<div class="absolute right-0 top-12 z-10 w-72 rounded-3 border border-[var(--background-modifier-border)] bg-[var(--background-primary)] p-3 shadow-lg">
+							<div class="absolute right-0 top-12 z-10 w-80 rounded-3 border border-[var(--background-modifier-border)] bg-[var(--background-primary)] p-3 shadow-lg">
 								<div class="mb-2 text-xs text-[var(--text-muted)]">
 									{t('provider')}
 								</div>
@@ -452,7 +540,6 @@ function App(props: AppProps) {
 									disabled={!selectedProvider()?.models.length || isBusy()}
 									onChange={(event) => {
 										props.onSelectModel(event.currentTarget.value)
-										setModelPickerOpen(false)
 									}}
 								>
 									<option value="">{t('noModel')}</option>
@@ -460,6 +547,106 @@ function App(props: AppProps) {
 										{(model) => <option value={model.id}>{model.name}</option>}
 									</For>
 								</select>
+								<div class="mt-4 border-t border-[var(--background-modifier-border)] pt-3">
+									<div class="mb-2 flex items-center justify-between gap-3 text-xs text-[var(--text-muted)]">
+										<span>{t('temperature')}</span>
+										<input
+											class="w-16 text-right"
+											type="number"
+											min="0"
+											max="2"
+											step="0.1"
+											value={temperatureInput()}
+											disabled={isBusy()}
+											onInput={(event) =>
+												setTemperatureInput(event.currentTarget.value)
+											}
+											onBlur={() =>
+												updateInferenceParams({
+													temperature: Number(temperatureInput()),
+													maxTokens: currentMaxTokens(),
+												})
+											}
+										/>
+									</div>
+									<input
+										class="w-full"
+										type="range"
+										min="0"
+										max="2"
+										step="0.1"
+										value={currentTemperature()}
+										disabled={isBusy()}
+										onInput={(event) =>
+											updateInferenceParams({
+												temperature: Number(event.currentTarget.value),
+												maxTokens: currentMaxTokens(),
+											})
+										}
+									/>
+									<div class="mb-2 mt-3 flex items-center justify-between gap-3 text-xs text-[var(--text-muted)]">
+										<span>{t('maxOutput')}</span>
+										<input
+											class="w-24 text-right"
+											type="number"
+											min="128"
+											max="32000"
+											step="128"
+											value={maxTokensInput()}
+											disabled={isBusy()}
+											onInput={(event) =>
+												setMaxTokensInput(event.currentTarget.value)
+											}
+											onBlur={() =>
+												updateInferenceParams({
+													temperature: currentTemperature(),
+													maxTokens: Number(maxTokensInput()),
+												})
+											}
+										/>
+									</div>
+									<div class="grid grid-cols-3 gap-2">
+										<button
+											class="chatbox-tag-button"
+											type="button"
+											disabled={isBusy()}
+											onClick={() =>
+												updateInferenceParams({
+													temperature: currentTemperature(),
+													maxTokens: 600,
+												})
+											}
+										>
+											{t('lengthShort')}
+										</button>
+										<button
+											class="chatbox-tag-button"
+											type="button"
+											disabled={isBusy()}
+											onClick={() =>
+												updateInferenceParams({
+													temperature: currentTemperature(),
+													maxTokens: 1200,
+												})
+											}
+										>
+											{t('lengthMedium')}
+										</button>
+										<button
+											class="chatbox-tag-button"
+											type="button"
+											disabled={isBusy()}
+											onClick={() =>
+												updateInferenceParams({
+													temperature: currentTemperature(),
+													maxTokens: 3000,
+												})
+											}
+										>
+											{t('lengthLong')}
+										</button>
+									</div>
+								</div>
 							</div>
 						</Show>
 					</div>
@@ -578,17 +765,61 @@ function App(props: AppProps) {
 								? 'chatbox-input-pane--resizable'
 								: 'border-t border-[var(--background-modifier-border)]'
 						}`}
+						onDrop={onDrop}
+						onDragOver={(event) => {
+							if (canAttachImages()) {
+								event.preventDefault()
+							}
+						}}
 						style={
 							desktopResizeEnabled() && typeof inputPaneHeight() === 'number'
 								? { height: `${inputPaneHeight()}px` }
 								: undefined
 						}
 					>
+						<input
+							ref={fileInputEl}
+							class="hidden"
+							type="file"
+							accept="image/*"
+							multiple
+							onChange={(event) => {
+								const files = event.currentTarget.files
+								if (files?.length) {
+									void addImageFiles(files)
+								}
+								event.currentTarget.value = ''
+							}}
+						/>
+						<Show when={attachments().length > 0}>
+							<div class="mb-2 flex shrink-0 gap-2 overflow-x-auto pb-1 scrollbar-default">
+								<For each={attachments()}>
+									{(attachment) => (
+										<div class="relative h-16 w-16 shrink-0 overflow-hidden rounded-2 border border-[var(--background-modifier-border)] bg-[var(--background-primary-alt)]">
+											<img
+												class="h-full w-full object-cover"
+												src={attachment.url}
+												alt={attachment.name}
+											/>
+											<button
+												class="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--background-primary)] p-0 text-xs leading-none text-[var(--text-muted)] shadow hover:text-[var(--text-error)]"
+												type="button"
+												title={t('removeAttachment')}
+												onClick={() => removeAttachment(attachment.id)}
+											>
+												×
+											</button>
+										</div>
+									)}
+								</For>
+							</div>
+						</Show>
 						<textarea
 							class="chatbox-input w-full resize-none rounded-3 border border-[var(--background-modifier-border)] bg-[var(--background-primary-alt)] text-sm outline-none"
 							placeholder={t('inputPlaceholder')}
 							value={input()}
 							onInput={(event) => setInput(event.currentTarget.value)}
+							onPaste={onPaste}
 							onCompositionStart={() => setIsComposing(true)}
 							onCompositionEnd={() => setIsComposing(false)}
 							onKeyDown={(event) => {
@@ -609,6 +840,19 @@ function App(props: AppProps) {
 								<button
 									class="chatbox-tag-button"
 									type="button"
+									disabled={!canAttachImages()}
+									title={
+										canAttachImages()
+											? t('attachImage')
+											: t('imageInputUnsupported')
+									}
+									onClick={() => fileInputEl?.click()}
+								>
+									{t('attachImage')}
+								</button>
+								<button
+									class="chatbox-tag-button"
+									type="button"
 									disabled={!props.canCreateFragment}
 									onClick={() => props.onNewFragment()}
 								>
@@ -626,7 +870,7 @@ function App(props: AppProps) {
 							<button
 								class="mod-cta"
 								type="button"
-								disabled={!input().trim()}
+								disabled={!input().trim() && attachments().length === 0}
 								onClick={() => void submit()}
 							>
 								{isBusy() ? t('queueSend') : t('send')}

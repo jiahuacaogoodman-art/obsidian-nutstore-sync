@@ -51,6 +51,22 @@ export type ChatTimelineItem =
 	| ChatTimelineFragmentItem
 	| ChatTimelineMessageItem
 
+export interface ChatImageAttachment {
+	id: string
+	name: string
+	url: string
+}
+
+export interface ChatInferenceParams {
+	temperature?: number
+	maxTokens?: number
+}
+
+export interface ChatSendPayload {
+	text: string
+	attachments?: ChatImageAttachment[]
+}
+
 export interface ChatboxViewModel {
 	title: string
 	sessionHistory: ChatSessionHistoryItem[]
@@ -66,6 +82,8 @@ export interface ChatboxViewModel {
 	canSend: boolean
 	canCreateFragment: boolean
 	canCompress: boolean
+	inferenceParams?: ChatInferenceParams
+	selectedModelSupportsImages?: boolean
 }
 
 export interface ChatboxProps extends ChatboxViewModel {
@@ -76,7 +94,8 @@ export interface ChatboxProps extends ChatboxViewModel {
 	onDeleteSession: (sessionId: string) => Promise<void>
 	onSelectProvider: (providerId: string) => void
 	onSelectModel: (modelId: string) => void
-	onSendMessage: (text: string) => Promise<void>
+	onSendMessage: (payload: ChatSendPayload) => Promise<void>
+	onUpdateInferenceParams?: (params: ChatInferenceParams) => void
 	onStopActiveRun?: () => void
 	onCancelTask?: (taskId: string) => void
 	onDeleteMessage?: (messageId: string) => void

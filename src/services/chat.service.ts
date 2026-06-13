@@ -46,7 +46,12 @@ import {
 	toFailedTask,
 	toRunningTask,
 } from '~/chat/domain'
-import type { ChatboxProps, ChatProviderOption } from '~/chatbox/types'
+import type {
+	ChatImageAttachment,
+	ChatSendPayload,
+	ChatboxProps,
+	ChatProviderOption,
+} from '~/chatbox/types'
 import i18n from '~/i18n'
 import { chatMetaKV, chatSessionKV, type ChatMetaRecord } from '~/storage'
 import createId from '~/utils/create-id'
@@ -99,6 +104,19 @@ interface SessionRuntimeState {
 
 function toTextParts(text: string): AIMessageContentPart[] {
 	return [{ type: 'text', text }]
+}
+
+function toUserContentParts(
+	text: string,
+	attachments: ChatImageAttachment[] = [],
+): AIMessageContentPart[] {
+	return [
+		...(text ? toTextParts(text) : []),
+		...attachments.map((attachment) => ({
+			type: 'image_url' as const,
+			image_url: { url: attachment.url },
+		})),
+	]
 }
 
 function messageToText(message: Pick<ChatMessage, 'content'> | AIMessage) {
@@ -360,9 +378,17 @@ export default class ChatService {
 			})),
 			selectedProviderId: selectedProvider?.id,
 			selectedModelId: selectedModel?.id,
+			selectedModelSupportsImages:
+				selectedModel?.modalities?.input?.includes('image') ?? false,
+			inferenceParams: activeSession?.inferenceParams
+				? { ...activeSession.inferenceParams }
+				: undefined,
 			runState: activeRuntime.runState,
 			pendingMessages: activeRuntime.pendingMessages.map((item) => ({
 				...item,
+				attachments: item.attachments?.map((attachment: ChatImageAttachment) => ({
+					...attachment,
+				})),
 			})),
 			canSend: true,
 			canCreateFragment: !!activeSession && activeRuntime.runState === 'idle',
@@ -391,8 +417,11 @@ export default class ChatService {
 			onSelectModel: (modelId: string) => {
 				this.selectModel(modelId)
 			},
-			onSendMessage: async (text: string) => {
-				await this.sendMessage(text)
+			onSendMessage: async (payload: ChatSendPayload) => {
+				await this.sendMessage(payload)
+			},
+			onUpdateInferenceParams: (params) => {
+				this.updateInferenceParams(params)
 			},
 			onStopActiveRun: () => {
 				this.stopActiveSessionRun()
@@ -574,10 +603,38 @@ export default class ChatService {
 		this.notify()
 	}
 
-	async sendMessage(text: string) {
+	updateInferenceParams(params: { temperature?: number; maxTokens?: number }) {
+		const session = this.getLoadedActiveSession()
+		if (!session) {
+			return
+		}
+		if (this.getRuntime(session.id).runState !== 'idle') {
+			return
+		}
+
+		const nextParams = {
+			...(Number.isFinite(params.temperature)
+				? { temperature: params.temperature }
+				: {}),
+			...(Number.isFinite(params.maxTokens)
+				? { maxTokens: params.maxTokens }
+				: {}),
+		}
+		session.inferenceParams =
+			Object.keys(nextParams).length > 0 ? nextParams : undefined
+		void this.persistSession(session)
+		this.notify()
+	}
+
+	async sendMessage(payload: ChatSendPayload | string) {
 		await this.initialize()
-		const normalizedText = text.trim()
-		if (!normalizedText) {
+		const normalizedPayload =
+			typeof payload === 'string' ? { text: payload } : payload
+		const normalizedText = normalizedPayload.text.trim()
+		const attachments = (normalizedPayload.attachments || []).filter(
+			(attachment) => !!attachment.url,
+		)
+		if (!normalizedText && attachments.length === 0) {
 			return
 		}
 
@@ -589,7 +646,9 @@ export default class ChatService {
 
 		const runtime = this.getRuntime(session.id)
 		if (runtime.runState !== 'idle' || runtime.processing) {
-			runtime.pendingMessages.push(this.createPendingMessage(normalizedText))
+			runtime.pendingMessages.push(
+				this.createPendingMessage(normalizedText, attachments),
+			)
 			this.notify()
 			return
 		}
@@ -597,6 +656,7 @@ export default class ChatService {
 		this.appendUserMessage(
 			this.getActiveFragment(session),
 			normalizedText,
+			attachments,
 			session,
 		)
 		this.upsertSessionIndexItem(session, deriveTitle(session))
@@ -669,7 +729,7 @@ export default class ChatService {
 						messageToText(response.message).trim() || COMPRESSION_PROMPT
 					const targetFragment = this.createFragment(session)
 					targetFragment.summary = summary
-					this.appendUserMessage(targetFragment, summary, session)
+					this.appendUserMessage(targetFragment, summary, [], session)
 					this.upsertSessionIndexItem(session, deriveTitle(session))
 					await this.persistSession(session)
 					await this.persistMetaAndIndex()
@@ -1248,12 +1308,37 @@ export default class ChatService {
 				this.notify()
 
 				const tools = this.createToolsForContext(session, 0, MAX_TASK_DEPTH)
+				const requestMessages = this.buildMessagesForFragment(fragment, session)
+				let lastStreamPersistedAt = 0
+				const streamingRecord = this.createMessageRecord({
+					role: 'assistant',
+					content: [],
+				})
+				fragment.messages.push(streamingRecord)
+				fragment.updatedAt = Date.now()
+				session.updatedAt = Date.now()
+				this.notify()
+
 				const response = await generateAssistantTurn({
 					provider,
 					model: model.id,
-					messages: this.buildMessagesForFragment(fragment, session),
+					messages: requestMessages,
 					tools,
 					...session.inferenceParams,
+					onTextDelta: async (_delta, fullText) => {
+						streamingRecord.message = {
+							role: 'assistant',
+							content: toTextParts(fullText),
+						}
+						fragment.updatedAt = Date.now()
+						session.updatedAt = Date.now()
+						this.notify()
+						const now = Date.now()
+						if (now - lastStreamPersistedAt > 1000) {
+							lastStreamPersistedAt = now
+							await this.persistSession(session)
+						}
+					},
 				})
 
 				if (this.deletedSessionIds.has(session.id)) {
@@ -1262,22 +1347,17 @@ export default class ChatService {
 					return
 				}
 
+				streamingRecord.message = response.message
+				streamingRecord.meta = { ...response.meta, modelId: model.id }
+				fragment.updatedAt = Date.now()
+				session.updatedAt = Date.now()
+
 				if (runtime.stopRequested) {
-					const record = this.createMessageRecord(response.message, {
-						meta: { ...response.meta, modelId: model.id },
-					})
-					fragment.messages.push(record)
 					this.finishStoppedSessionRun(session, fragment)
 					await this.persistSession(session)
 					return
 				}
 
-				const assistantRecord = this.createMessageRecord(response.message, {
-					meta: { ...response.meta, modelId: model.id },
-				})
-				fragment.messages.push(assistantRecord)
-				fragment.updatedAt = Date.now()
-				session.updatedAt = Date.now()
 				await this.persistSession(session)
 				this.notify()
 
@@ -1375,14 +1455,17 @@ export default class ChatService {
 			.map((item) => item.text.trim())
 			.filter(Boolean)
 			.join('\n\n')
+		const attachments = runtime.pendingMessages.flatMap(
+			(item) => item.attachments || [],
+		)
 		runtime.pendingMessages = []
-		if (!mergedText) {
+		if (!mergedText && attachments.length === 0) {
 			this.notify()
 			return false
 		}
 
 		const fragment = this.getActiveFragment(session)
-		this.appendUserMessage(fragment, mergedText, session)
+		this.appendUserMessage(fragment, mergedText, attachments, session)
 		this.upsertSessionIndexItem(session, deriveTitle(session))
 		void this.persistSession(session)
 		void this.persistMetaAndIndex()
@@ -1411,11 +1494,15 @@ export default class ChatService {
 		return requests
 	}
 
-	private createPendingMessage(text: string): ChatPendingMessage {
+	private createPendingMessage(
+		text: string,
+		attachments: ChatImageAttachment[] = [],
+	): ChatPendingMessage {
 		return {
 			id: createId('pending'),
 			createdAt: Date.now(),
 			text,
+			attachments: attachments.map((attachment) => ({ ...attachment })),
 		}
 	}
 
@@ -1442,6 +1529,7 @@ export default class ChatService {
 	private appendUserMessage(
 		fragment: ChatFragment,
 		text: string,
+		attachments: ChatImageAttachment[] = [],
 		session?: AISession,
 	) {
 		const now = Date.now()
@@ -1452,7 +1540,7 @@ export default class ChatService {
 		fragment.messages.push(
 			this.createMessageRecord({
 				role: 'user',
-				content: toTextParts(text),
+				content: toUserContentParts(text, attachments),
 			}),
 		)
 	}
