@@ -1529,7 +1529,9 @@ export default class ChatService {
 					return
 				}
 
-				streamingRecord.message = response.message
+				streamingRecord.message = await this.persistAssistantImages(
+					response.message,
+				)
 				streamingRecord.meta = { ...response.meta, modelId: model.id }
 				fragment.updatedAt = Date.now()
 				session.updatedAt = Date.now()
@@ -2424,6 +2426,32 @@ export default class ChatService {
 		return {
 			path,
 			url: this.getVaultResourceUrl(path, file) || image.dataUrl,
+		}
+	}
+
+	private async persistAssistantImages(message: AIMessage) {
+		if (message.role !== 'assistant' || !message.content?.length) {
+			return message
+		}
+		const content = await Promise.all(
+			message.content.map(async (part) => {
+				if (
+					part.type !== 'image_url' ||
+					!part.image_url.url.startsWith('data:')
+				) {
+					return part
+				}
+				const image = normalizeImageContent(part.image_url.url, 'image/png')
+				const saved = await this.saveGeneratedImage(image.base64, image.mediaType)
+				return {
+					type: 'image_url' as const,
+					image_url: { url: saved.url },
+				}
+			}),
+		)
+		return {
+			...message,
+			content,
 		}
 	}
 

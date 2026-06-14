@@ -162,11 +162,12 @@ function toAISDKTools(tools: AIToolDefinition[]) {
 
 function toAssistantMessage(
 	result: Pick<GenerateTextResult<any, any>, 'text' | 'toolCalls'> & {
+		files?: Array<{ base64: string; mediaType: string }>
 		response?: { body?: unknown }
 	},
 	interleavedField?: string,
 ): AIMessage {
-	const toolCalls = result.toolCalls.map((toolCall) => ({
+	const toolCalls = (result.toolCalls || []).map((toolCall) => ({
 		id: toolCall.toolCallId,
 		type: 'function' as const,
 		function: {
@@ -174,17 +175,28 @@ function toAssistantMessage(
 			arguments: JSON.stringify(toolCall.input ?? {}),
 		},
 	}))
+	const imageParts = (result.files || [])
+		.filter((file) => file.mediaType?.startsWith('image/'))
+		.map((file) => ({
+			type: 'image_url' as const,
+			image_url: {
+				url: file.base64.startsWith('data:')
+					? file.base64
+					: `data:${file.mediaType};base64,${file.base64}`,
+			},
+		}))
+	const content = [...(toTextParts(result.text) || []), ...imageParts]
 
 	const message: AIMessage =
 		toolCalls.length > 0
 			? {
 					role: 'assistant',
-					content: toTextParts(result.text),
+					content: content.length ? content : null,
 					tool_calls: toolCalls,
 				}
 			: {
 					role: 'assistant',
-					content: toTextParts(result.text) || [],
+					content,
 				}
 
 	if (interleavedField && message.role === 'assistant') {
@@ -373,11 +385,12 @@ export async function streamAssistantTurn(
 		await request.onTextDelta?.(delta, fullText)
 	}
 
-	const [text, toolCalls, usage, response] = await Promise.all([
+	const [text, toolCalls, usage, response, files] = await Promise.all([
 		result.text,
 		result.toolCalls,
 		result.usage,
 		result.response,
+		result.files,
 	])
 
 	return {
@@ -385,6 +398,7 @@ export async function streamAssistantTurn(
 			{
 				text,
 				toolCalls,
+				files,
 				response: response as LanguageModelResponseMetadata & { body?: unknown },
 			},
 			interleavedField,

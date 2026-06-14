@@ -180,4 +180,48 @@ describe('generateAssistantTurn', () => {
 			},
 		})
 	})
+
+	it('maps image files from language model output to assistant image parts', async () => {
+		aiMocks.generateText.mockResolvedValueOnce({
+			text: 'Here is the image',
+			toolCalls: [],
+			files: [
+				{
+					base64: Buffer.from('png-bytes').toString('base64'),
+					mediaType: 'image/png',
+				},
+			],
+			usage: {
+				inputTokens: 3,
+				outputTokens: 2,
+				totalTokens: 5,
+			},
+			response: {},
+		})
+
+		const result = await generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Generate an image' }],
+				},
+			],
+			tools: [],
+		})
+
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [
+				{ type: 'text', text: 'Here is the image' },
+				{
+					type: 'image_url',
+					image_url: {
+						url: `data:image/png;base64,${Buffer.from('png-bytes').toString('base64')}`,
+					},
+				},
+			],
+		})
+	})
 })

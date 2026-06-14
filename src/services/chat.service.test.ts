@@ -548,6 +548,48 @@ describe('ChatService fragment workflows', () => {
 		})
 	})
 
+	it('stores assistant image parts produced by language models in the vault', async () => {
+		const outputBase64 = Buffer.from('language-image').toString('base64')
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'text', text: 'Here is the image' },
+					{
+						type: 'image_url',
+						image_url: { url: `data:image/png;base64,${outputBase64}` },
+					},
+				],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault()
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Generate an image')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toBeTruthy()
+		expect(files.get(generatedPath!)).toBe('language-image')
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content).toEqual([
+			{ type: 'text', text: 'Here is the image' },
+			{
+				type: 'image_url',
+				image_url: { url: `app://vault/${generatedPath}` },
+			},
+		])
+	})
+
 	it('does not replay generated assistant image data to text models', async () => {
 		generateAssistantTurn.mockResolvedValueOnce({
 			message: {
