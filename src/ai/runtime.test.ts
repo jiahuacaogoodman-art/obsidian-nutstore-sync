@@ -124,6 +124,139 @@ describe('generateAssistantTurn', () => {
 		})
 	})
 
+	it('retries without tools and optional params when compatible providers reject them', async () => {
+		aiMocks.generateText
+			.mockRejectedValueOnce(new Error('tools not supported'))
+			.mockRejectedValueOnce(new Error('temperature not supported'))
+			.mockResolvedValueOnce({
+				text: 'Plain fallback answer',
+				toolCalls: [],
+				files: [],
+				usage: {
+					inputTokens: 2,
+					outputTokens: 3,
+					totalTokens: 5,
+				},
+				response: {},
+			})
+
+		const result = await generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+			],
+			tools: [
+				{
+					name: 'search',
+					description: 'Search',
+					inputSchema: {} as never,
+					execute: vi.fn(),
+				},
+			],
+			temperature: 0.7,
+			maxTokens: 1200,
+		})
+
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(3)
+		expect(aiMocks.generateText.mock.calls[0][0]).toMatchObject({
+			temperature: 0.7,
+			maxOutputTokens: 1200,
+		})
+		expect(Object.keys(aiMocks.generateText.mock.calls[0][0].tools)).toEqual([
+			'search',
+		])
+		expect(aiMocks.generateText.mock.calls[1][0].tools).toEqual({})
+		expect(aiMocks.generateText.mock.calls[1][0]).toMatchObject({
+			temperature: 0.7,
+			maxOutputTokens: 1200,
+		})
+		expect(aiMocks.generateText.mock.calls[2][0].tools).toEqual({})
+		expect(aiMocks.generateText.mock.calls[2][0]).not.toHaveProperty(
+			'temperature',
+		)
+		expect(aiMocks.generateText.mock.calls[2][0]).not.toHaveProperty(
+			'maxOutputTokens',
+		)
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Plain fallback answer' }],
+		})
+	})
+
+	it('falls back to only the latest user message when full context is rejected', async () => {
+		aiMocks.generateText
+			.mockRejectedValueOnce(new Error('full context rejected'))
+			.mockRejectedValueOnce(new Error('tools rejected'))
+			.mockRejectedValueOnce(new Error('params rejected'))
+			.mockResolvedValueOnce({
+				text: 'Minimal fallback answer',
+				toolCalls: [],
+				files: [],
+				usage: {
+					inputTokens: 1,
+					outputTokens: 2,
+					totalTokens: 3,
+				},
+				response: {},
+			})
+
+		const result = await generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'system',
+					content: [{ type: 'text', text: 'You are helpful.' }],
+				},
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Old question' }],
+				},
+				{
+					role: 'assistant',
+					content: [{ type: 'text', text: 'Old answer' }],
+				},
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Latest question' }],
+				},
+			],
+			tools: [
+				{
+					name: 'search',
+					description: 'Search',
+					inputSchema: {} as never,
+					execute: vi.fn(),
+				},
+			],
+			temperature: 0.7,
+			maxTokens: 1200,
+		})
+
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(4)
+		expect(aiMocks.generateText.mock.calls[3][0].tools).toEqual({})
+		expect(aiMocks.generateText.mock.calls[3][0]).not.toHaveProperty(
+			'temperature',
+		)
+		expect(aiMocks.generateText.mock.calls[3][0]).not.toHaveProperty(
+			'maxOutputTokens',
+		)
+		expect(aiMocks.generateText.mock.calls[3][0].messages).toEqual([
+			{
+				role: 'user',
+				content: [{ type: 'text', text: 'Latest question' }],
+			},
+		])
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Minimal fallback answer' }],
+		})
+	})
+
 	it('passes text and reference images to image generation models', async () => {
 		aiMocks.generateImage.mockResolvedValueOnce({
 			image: {

@@ -33,6 +33,12 @@ export interface GenerateAssistantTurnRequest {
 	onTextDelta?: (delta: string, fullText: string) => void | Promise<void>
 }
 
+interface GenerateTextAssistantTurnOptions {
+	disableTools?: boolean
+	disableOptionalParams?: boolean
+	minimalMessages?: boolean
+}
+
 export interface GenerateAssistantTurnResult {
 	message: AIMessage
 	meta: AIMessageMeta
@@ -265,6 +271,11 @@ function getLastUserMessage(messages: AIMessage[]) {
 	return undefined
 }
 
+function toMinimalMessages(messages: AIMessage[]) {
+	const lastUserMessage = getLastUserMessage(messages)
+	return lastUserMessage ? [lastUserMessage] : messages
+}
+
 function toImagePrompt(message: AIMessage | undefined) {
 	if (!message) {
 		return ''
@@ -309,16 +320,48 @@ export async function generateAssistantTurn(
 		try {
 			return await streamAssistantTurn(request)
 		} catch {
-			return generateTextAssistantTurn(request, interleavedField)
+			return generateTextAssistantTurnWithFallbacks(request, interleavedField)
 		}
 	}
 
-	return generateTextAssistantTurn(request, interleavedField)
+	return generateTextAssistantTurnWithFallbacks(request, interleavedField)
+}
+
+async function generateTextAssistantTurnWithFallbacks(
+	request: GenerateAssistantTurnRequest,
+	interleavedField?: string,
+): Promise<GenerateAssistantTurnResult> {
+	const attempts: GenerateTextAssistantTurnOptions[] = [
+		{},
+		{ disableTools: true },
+		{ disableTools: true, disableOptionalParams: true },
+		{
+			disableTools: true,
+			disableOptionalParams: true,
+			minimalMessages: true,
+		},
+	]
+	let lastError: unknown
+	for (const options of attempts) {
+		try {
+			return await generateTextAssistantTurn(
+				request,
+				interleavedField,
+				options,
+			)
+		} catch (error) {
+			lastError = error
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error('No assistant output was generated.')
 }
 
 async function generateTextAssistantTurn(
 	request: GenerateAssistantTurnRequest,
 	interleavedField?: string,
+	options: GenerateTextAssistantTurnOptions = {},
 ): Promise<GenerateAssistantTurnResult> {
 	const resolver = getProviderResolver(request.provider)
 	const modelName =
@@ -328,13 +371,20 @@ async function generateTextAssistantTurn(
 		request.model,
 		{ messages: request.messages, interleavedField },
 	)
+	const messages = options.minimalMessages
+		? toMinimalMessages(request.messages)
+		: request.messages
 	const result = await generateText({
 		model,
-		messages: toModelMessages(request.messages),
-		tools: toAISDKTools(request.tools),
+		messages: toModelMessages(messages),
+		tools: options.disableTools ? {} : toAISDKTools(request.tools),
 		stopWhen: stepCountIs(1),
-		temperature: request.temperature,
-		maxOutputTokens: request.maxTokens,
+		...(options.disableOptionalParams
+			? {}
+			: {
+					temperature: request.temperature,
+					maxOutputTokens: request.maxTokens,
+				}),
 		experimental_include: {
 			responseBody: !!interleavedField,
 		},

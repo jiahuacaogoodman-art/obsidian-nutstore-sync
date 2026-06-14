@@ -1165,6 +1165,12 @@ export default class ChatService {
 	private rehydrateSession(session: AISession) {
 		const rehydrated = this.normalizeSession(session)
 		let changed = this.sanitizeSessionSelection(rehydrated)
+		for (const fragment of rehydrated.fragments) {
+			if (removeEmptyAssistantPlaceholders(fragment)) {
+				fragment.updatedAt = Date.now()
+				changed = true
+			}
+		}
 
 		for (const task of rehydrated.tasks) {
 			if (task.status !== 'queued' && task.status !== 'running') {

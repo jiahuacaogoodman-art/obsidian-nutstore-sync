@@ -1497,6 +1497,53 @@ describe('ChatService fragment workflows', () => {
 		})
 	})
 
+	it('removes empty assistant placeholders during rehydration', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Initial response' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		await service.sendMessage('Original message')
+
+		const sessionId = service.getViewProps().activeSessionId!
+		const stored = await storageState.chatSessionKV.get(sessionId)
+		stored.fragments[0].messages.push({
+			id: 'empty-assistant',
+			createdAt: 3,
+			updatedAt: 3,
+			message: {
+				role: 'assistant',
+				content: null,
+			},
+		})
+		await storageState.chatSessionKV.set(sessionId, stored)
+
+		const reloadedService = new ChatService(createPlugin() as never)
+		await reloadedService.ensureSession()
+
+		const reloaded = getActiveSession(reloadedService)
+		expect(
+			reloaded.fragments[0].messages.some(
+				(item: any) => item.id === 'empty-assistant',
+			),
+		).toBe(false)
+		const persisted = await storageState.chatSessionKV.get(sessionId)
+		expect(
+			persisted.fragments[0].messages.some(
+				(item: any) => item.id === 'empty-assistant',
+			),
+		).toBe(false)
+	})
+
 	it('coerces numeric string arguments before executing tools', async () => {
 		const service = new ChatService(createPlugin() as never)
 		const execute = vi.fn(async (params: Record<string, unknown>) => ({
