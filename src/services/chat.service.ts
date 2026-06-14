@@ -38,6 +38,7 @@ import {
 	ChatRunState,
 	ChatSessionIndexItem,
 	cloneMessage,
+	cloneMessageRecord,
 	cloneReversibleToolOp,
 	cloneSession,
 	createQueuedTask,
@@ -1334,6 +1335,16 @@ export default class ChatService {
 			const items = fragment.messages.flatMap((message) => {
 				const toolMessage =
 					message.message.role === 'tool' ? message.message : undefined
+				const toolCall = toolMessage
+					? flattenedMessages
+							.slice(
+								0,
+								flattenedMessages.findIndex((item) => item.id === message.id),
+							)
+							.reverse()
+							.flatMap((item) => getAssistantToolCalls(item.message) || [])
+							.find((toolCall) => toolCall.id === toolMessage.tool_call_id)
+					: undefined
 				if (
 					message.message.role === 'assistant' &&
 					!messageToText(message.message).trim() &&
@@ -1350,18 +1361,12 @@ export default class ChatService {
 						id: `message:${message.id}`,
 						kind: 'message' as const,
 						createdAt: message.createdAt,
-						message,
-						toolCall: toolMessage
-							? flattenedMessages
-									.slice(
-										0,
-										flattenedMessages.findIndex(
-											(item) => item.id === message.id,
-										),
-									)
-									.reverse()
-									.flatMap((item) => getAssistantToolCalls(item.message) || [])
-									.find((toolCall) => toolCall.id === toolMessage.tool_call_id)
+						message: cloneMessageRecord(message),
+						toolCall: toolCall
+							? {
+									...toolCall,
+									function: { ...toolCall.function },
+								}
 							: undefined,
 					},
 				]

@@ -43,10 +43,10 @@ const storageState = vi.hoisted(() => {
 
 const { generateAssistantTurn, generateImageTurn, assertProviderUsable } =
 	vi.hoisted(() => ({
-	generateAssistantTurn: vi.fn(),
-	generateImageTurn: vi.fn(),
-	assertProviderUsable: vi.fn(),
-}))
+		generateAssistantTurn: vi.fn(),
+		generateImageTurn: vi.fn(),
+		assertProviderUsable: vi.fn(),
+	}))
 
 vi.mock('~/ai/runtime', () => ({
 	generateAssistantTurn,
@@ -439,7 +439,9 @@ describe('ChatService fragment workflows', () => {
 
 		const session = getActiveSession(service)
 		const userMessage = session.fragments[0].messages[0].message
-		expect(userMessage.content).toEqual([{ type: 'text', text: 'Describe this' }])
+		expect(userMessage.content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+		])
 		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
 			{ type: 'text', text: 'Describe this' },
 		])
@@ -551,6 +553,45 @@ describe('ChatService fragment workflows', () => {
 		expect(assistantMessage.content?.[0]).toEqual({
 			type: 'text',
 			text: 'Hello',
+		})
+	})
+
+	it('returns fresh timeline message snapshots for streaming UI updates', async () => {
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		const session = getActiveSession(service)
+		const fragment = session.fragments[0]
+		const record = (service as any).createMessageRecord({
+			role: 'assistant',
+			content: [{ type: 'text', text: '' }],
+		})
+		fragment.messages.push(record)
+
+		const firstTimelineMessage = service
+			.getViewProps()
+			.timeline.find((item) => item.kind === 'message')
+		record.message = {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Live reply' }],
+		}
+		const secondTimelineMessage = service
+			.getViewProps()
+			.timeline.find((item) => item.kind === 'message')
+
+		expect(firstTimelineMessage?.kind).toBe('message')
+		expect(secondTimelineMessage?.kind).toBe('message')
+		if (
+			firstTimelineMessage?.kind !== 'message' ||
+			secondTimelineMessage?.kind !== 'message'
+		) {
+			throw new Error('Expected message timeline items')
+		}
+		expect(firstTimelineMessage.message).not.toBe(record)
+		expect(secondTimelineMessage.message).not.toBe(record)
+		expect(secondTimelineMessage.message).not.toBe(firstTimelineMessage.message)
+		expect(secondTimelineMessage.message.message.content?.[0]).toEqual({
+			type: 'text',
+			text: 'Live reply',
 		})
 	})
 
@@ -680,7 +721,8 @@ describe('ChatService fragment workflows', () => {
 			(message: any) =>
 				message.role === 'user' &&
 				message.content?.some?.(
-					(part: any) => part.type === 'text' && part.text.includes('old image'),
+					(part: any) =>
+						part.type === 'text' && part.text.includes('old image'),
 				),
 		)
 		expect(oldUser.content).toEqual([
@@ -701,10 +743,11 @@ describe('ChatService fragment workflows', () => {
 		})
 
 		const { plugin, files } = createPluginWithVault()
-		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
-			id: 'gpt-image-2',
-			name: 'gpt-image-2',
-		}
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+			}
 		plugin.settings.ai.defaultModel = {
 			providerId: 'provider-1',
 			modelId: 'gpt-image-2',
@@ -756,10 +799,11 @@ describe('ChatService fragment workflows', () => {
 			{},
 			{ createBinaryReturnsFile: false },
 		)
-		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
-			id: 'gpt-image-2',
-			name: 'gpt-image-2',
-		}
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+			}
 		plugin.settings.ai.defaultModel = {
 			providerId: 'provider-1',
 			modelId: 'gpt-image-2',
@@ -797,11 +841,12 @@ describe('ChatService fragment workflows', () => {
 		})
 
 		const { plugin } = createPluginWithVault()
-		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
-			id: 'gpt-image-2',
-			name: 'gpt-image-2',
-			modalities: { input: ['text'], output: ['text'] },
-		}
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+				modalities: { input: ['text'], output: ['text'] },
+			}
 		plugin.settings.ai.defaultModel = {
 			providerId: 'provider-1',
 			modelId: 'gpt-image-2',
@@ -848,10 +893,11 @@ describe('ChatService fragment workflows', () => {
 		const { plugin, files } = createPluginWithVault()
 		delete (plugin.app.vault as any).getResourcePath
 		delete (plugin.app.vault.adapter as any).getResourcePath
-		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
-			id: 'gpt-image-2',
-			name: 'gpt-image-2',
-		}
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+			}
 		plugin.settings.ai.defaultModel = {
 			providerId: 'provider-1',
 			modelId: 'gpt-image-2',
@@ -1018,8 +1064,7 @@ describe('ChatService fragment workflows', () => {
 		await reloadedService.ensureSession()
 		await reloadedService.sendMessage('After reload')
 
-		const messagesAfterReload =
-			generateAssistantTurn.mock.calls[2][0].messages
+		const messagesAfterReload = generateAssistantTurn.mock.calls[2][0].messages
 		const replayedAssistant = messagesAfterReload.find(
 			(message: any) =>
 				message.role === 'assistant' && message.interleaved !== undefined,
