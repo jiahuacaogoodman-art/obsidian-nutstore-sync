@@ -239,6 +239,17 @@ function decodeBase64ToArrayBuffer(contentBase64: string) {
 	) as ArrayBuffer
 }
 
+function normalizeImageContent(content: string, mediaType: string) {
+	const match = content.match(/^data:([^;,]+)?;base64,(.*)$/)
+	const normalizedMediaType = match?.[1] || mediaType || 'image/png'
+	const base64 = match?.[2] || content
+	return {
+		base64,
+		mediaType: normalizedMediaType,
+		dataUrl: `data:${normalizedMediaType};base64,${base64}`,
+	}
+}
+
 function getImageExtension(mediaType: string) {
 	switch (mediaType.toLowerCase()) {
 		case 'image/jpeg':
@@ -739,16 +750,22 @@ export default class ChatService {
 		const normalizedPayload =
 			typeof payload === 'string' ? { text: payload } : payload
 		const normalizedText = normalizedPayload.text.trim()
-		const attachments = (normalizedPayload.attachments || []).filter(
+		const rawAttachments = (normalizedPayload.attachments || []).filter(
 			(attachment) => !!attachment.url,
 		)
-		if (!normalizedText && attachments.length === 0) {
+		if (!normalizedText && rawAttachments.length === 0) {
 			return
 		}
 
 		const session =
 			this.getLoadedActiveSession() || (await this.createSession())
 		if (!session || !this.validateSessionSelection(session)) {
+			return
+		}
+		const provider = this.getProviderOrThrow(session)
+		const model = this.getModelOrThrow(provider, session)
+		const attachments = modelSupportsImageInput(model) ? rawAttachments : []
+		if (!normalizedText && attachments.length === 0) {
 			return
 		}
 
@@ -1447,7 +1464,7 @@ export default class ChatService {
 						return
 					}
 
-					const imagePath = await this.saveGeneratedImage(
+					const generatedImage = await this.saveGeneratedImage(
 						response.contentBase64,
 						response.mediaType,
 					)
@@ -1456,12 +1473,12 @@ export default class ChatService {
 						content: [
 							{
 								type: 'text',
-								text: `Generated image saved to ${imagePath}`,
+								text: `Generated image saved to ${generatedImage.path}`,
 							},
 							{
 								type: 'image_url',
 								image_url: {
-									url: `data:${response.mediaType};base64,${response.contentBase64}`,
+									url: generatedImage.url,
 								},
 							},
 						],
@@ -2349,10 +2366,41 @@ export default class ChatService {
 		await this.plugin.app.vault.createFolder(path)
 	}
 
+	private getVaultResourceUrl(path: string, target?: unknown) {
+		const vault = this.plugin.app.vault as {
+			getResourcePath?: (file: unknown) => string
+			adapter?: { getResourcePath?: (path: string) => string }
+			getAbstractFileByPath?: (path: string) => unknown
+		}
+		const file = target || vault.getAbstractFileByPath?.(path)
+		if (file && typeof vault.getResourcePath === 'function') {
+			try {
+				const url = vault.getResourcePath(file)
+				if (url) {
+					return url
+				}
+			} catch (error) {
+				logger.error(error)
+			}
+		}
+		if (typeof vault.adapter?.getResourcePath === 'function') {
+			try {
+				const url = vault.adapter.getResourcePath(path)
+				if (url) {
+					return url
+				}
+			} catch (error) {
+				logger.error(error)
+			}
+		}
+		return undefined
+	}
+
 	private async saveGeneratedImage(contentBase64: string, mediaType: string) {
 		await this.ensureVaultDirectory(AI_GENERATED_IMAGES_DIR)
-		const data = decodeBase64ToArrayBuffer(contentBase64)
-		const extension = getImageExtension(mediaType)
+		const image = normalizeImageContent(contentBase64, mediaType)
+		const data = decodeBase64ToArrayBuffer(image.base64)
+		const extension = getImageExtension(image.mediaType)
 		const baseName = `image-${createTimestampSlug()}`
 		let path = normalizePath(
 			`${AI_GENERATED_IMAGES_DIR}/${baseName}.${extension}`,
@@ -2364,8 +2412,11 @@ export default class ChatService {
 			)
 			suffix += 1
 		}
-		await this.plugin.app.vault.createBinary(path, data)
-		return path
+		const file = await this.plugin.app.vault.createBinary(path, data)
+		return {
+			path,
+			url: this.getVaultResourceUrl(path, file) || image.dataUrl,
+		}
 	}
 
 	private async writeVaultFile(path: string, contentBase64: string) {

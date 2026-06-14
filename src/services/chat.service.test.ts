@@ -181,6 +181,9 @@ function createPluginWithVault(initialFiles: Record<string, string> = {}) {
 						files.set(normalized, new TextDecoder().decode(data))
 						return getAbstractFileByPath(normalized)
 					},
+					getResourcePath(file: { path: string }) {
+						return `app://vault/${file.path}`
+					},
 					async modifyBinary(file: any, data: ArrayBuffer) {
 						files.set(normalize(file.path), new TextDecoder().decode(data))
 					},
@@ -430,12 +433,52 @@ describe('ChatService fragment workflows', () => {
 
 		const session = getActiveSession(service)
 		const userMessage = session.fragments[0].messages[0].message
+		expect(userMessage.content).toEqual([{ type: 'text', text: 'Describe this' }])
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+		])
+	})
+
+	it('stores image attachments for image-capable chat models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Image received' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const plugin = createPlugin() as any
+		plugin.settings.ai.providers['provider-1'].models['model-1'].modalities = {
+			input: ['text', 'image'],
+			output: ['text'],
+		}
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage({
+			text: 'Describe this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'image.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		const session = getActiveSession(service)
+		const userMessage = session.fragments[0].messages[0].message
 		expect(userMessage.content).toEqual([
 			{ type: 'text', text: 'Describe this' },
 			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
 		])
 		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
 			{ type: 'text', text: 'Describe this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
 		])
 	})
 
@@ -638,7 +681,7 @@ describe('ChatService fragment workflows', () => {
 		expect(assistantMessage.content?.[1]).toEqual({
 			type: 'image_url',
 			image_url: {
-				url: `data:image/png;base64,${Buffer.from('png-bytes').toString('base64')}`,
+				url: `app://vault/${generatedPath}`,
 			},
 		})
 		expect(generateAssistantTurn).not.toHaveBeenCalled()
@@ -647,6 +690,50 @@ describe('ChatService fragment workflows', () => {
 				model: 'gpt-image-2',
 			}),
 		)
+	})
+
+	it('accepts data URL image results when storing generated images', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: `data:image/webp;base64,${Buffer.from('webp-bytes').toString('base64')}`,
+			mediaType: 'image/png',
+			prompt: 'Draw a comet',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault()
+		delete (plugin.app.vault as any).getResourcePath
+		delete (plugin.app.vault.adapter as any).getResourcePath
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
+			id: 'gpt-image-2',
+			name: 'gpt-image-2',
+		}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Draw a comet')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toMatch(/\.webp$/)
+		expect(files.get(generatedPath!)).toBe('webp-bytes')
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content?.[1]).toEqual({
+			type: 'image_url',
+			image_url: {
+				url: `data:image/webp;base64,${Buffer.from('webp-bytes').toString('base64')}`,
+			},
+		})
 	})
 
 	it('persists interleaved assistant fields on the message and forwards them on every subsequent turn', async () => {
