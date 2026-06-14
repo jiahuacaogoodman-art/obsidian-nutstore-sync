@@ -13,7 +13,9 @@ import {
 	streamText,
 } from 'ai'
 import { getInterleavedMessageField } from './interleaved-message-field'
+import { getOpenAIChatCompletionURLs } from './providers/openai-base-url'
 import { getProviderResolver } from './providers/registry'
+import { obsidianFetch } from './transport/obsidian-fetch'
 import {
 	AIMessage,
 	AIMessageContentPart,
@@ -449,9 +451,114 @@ async function generateTextAssistantTurnWithFallbacks(
 			lastError = error
 		}
 	}
+	try {
+		return await generateTextAssistantTurnDirect(request)
+	} catch (error) {
+		lastError = error
+	}
 	throw lastError instanceof Error
 		? lastError
 		: new Error('No assistant output was generated.')
+}
+
+function toOpenAITextMessage(message: AIMessage) {
+	const content = (message.content || [])
+		.filter(
+			(part): part is Extract<AIMessageContentPart, { type: 'text' }> =>
+				part.type === 'text',
+		)
+		.map((part) => part.text)
+		.join('\n')
+	return {
+		role: message.role,
+		content,
+	}
+}
+
+function createDirectTextMessages(messages: AIMessage[]) {
+	const lastUserMessage = getLastUserMessage(messages)
+	return (lastUserMessage ? [lastUserMessage] : messages)
+		.filter((message) => message.role === 'user' || message.role === 'system')
+		.map(toOpenAITextMessage)
+		.filter((message) => message.content.trim().length > 0)
+}
+
+async function generateTextAssistantTurnDirect(
+	request: GenerateAssistantTurnRequest,
+): Promise<GenerateAssistantTurnResult> {
+	const messages = createDirectTextMessages(request.messages)
+	if (messages.length === 0) {
+		throw new Error('Enter a message before generating a response.')
+	}
+
+	const modelName =
+		request.provider.models[request.model]?.name?.trim() || request.model
+	let lastError: unknown
+	for (const url of getOpenAIChatCompletionURLs(request.provider.api)) {
+		try {
+			const response = await obsidianFetch(url, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					authorization: `Bearer ${request.provider.apiKey}`,
+				},
+				body: JSON.stringify({
+					model: request.model,
+					messages,
+					stream: false,
+				}),
+			})
+			const body = await response.json().catch(() => undefined)
+			if (!response.ok) {
+				throw new Error(
+					typeof body?.error?.message === 'string'
+						? body.error.message
+						: `Direct text request failed: ${response.status} ${response.statusText}`,
+				)
+			}
+			const message = toAssistantMessage({
+				text: '',
+				toolCalls: [],
+				files: [],
+				response: { body },
+			})
+			if (!message.content?.length) {
+				throw new Error('No assistant output was generated.')
+			}
+			if (request.onTextDelta) {
+				const text = (message.content || [])
+					.filter(
+						(part): part is Extract<AIMessageContentPart, { type: 'text' }> =>
+							part.type === 'text',
+					)
+					.map((part) => part.text)
+					.join('\n')
+				if (text) {
+					await request.onTextDelta(text, text)
+				}
+			}
+			return {
+				message,
+				meta: {
+					providerId: request.provider.id,
+					providerName: request.provider.name || 'OpenAI',
+					modelName,
+					usage: body?.usage
+						? {
+						inputTokens: body?.usage?.prompt_tokens,
+						outputTokens: body?.usage?.completion_tokens,
+						totalTokens: body?.usage?.total_tokens,
+							}
+						: undefined,
+				},
+			}
+		} catch (error) {
+			lastError = error
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error('Direct text request failed.')
 }
 
 async function generateTextAssistantTurn(

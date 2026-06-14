@@ -4,6 +4,7 @@ import { createInterleavedMessageFieldFetch } from '~/ai/interleaved-message-fie
 import { obsidianFetch } from '~/ai/transport/obsidian-fetch'
 import type { AIProviderConfig } from '~/ai/types'
 import i18n from '~/i18n'
+import { getOpenAIBaseURL } from './openai-base-url'
 import type { AIProviderResolver } from './types'
 
 function assertProviderUsable(provider: AIProviderConfig) {
@@ -16,11 +17,11 @@ export const openAIProviderResolver: AIProviderResolver = {
 	assertUsable: assertProviderUsable,
 	createLanguageModel(provider, modelId, context) {
 		assertProviderUsable(provider)
-		const factory = createOpenAI({
-			name: provider.name || 'openai',
-			baseURL: provider.api,
-			apiKey: provider.apiKey,
-			fetch: createInterleavedMessageFieldFetch(
+			const factory = createOpenAI({
+				name: provider.name || 'openai',
+				baseURL: getOpenAIBaseURL(provider.api),
+				apiKey: provider.apiKey,
+				fetch: createInterleavedMessageFieldFetch(
 				obsidianFetch,
 				context?.messages,
 				context?.interleavedField,
@@ -37,11 +38,11 @@ export const openAIProviderResolver: AIProviderResolver = {
 	},
 	createImageModel(provider, modelId) {
 		assertProviderUsable(provider)
-		const factory = createOpenAI({
-			name: provider.name || 'openai',
-			baseURL: provider.api,
-			apiKey: provider.apiKey,
-			fetch: obsidianFetch,
+			const factory = createOpenAI({
+				name: provider.name || 'openai',
+				baseURL: getOpenAIBaseURL(provider.api),
+				apiKey: provider.apiKey,
+				fetch: obsidianFetch,
 		})
 
 		return {

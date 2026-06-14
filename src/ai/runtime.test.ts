@@ -22,6 +22,10 @@ const providerMocks = vi.hoisted(() => ({
 	assertUsable: vi.fn(),
 }))
 
+const transportMocks = vi.hoisted(() => ({
+	obsidianFetch: vi.fn(),
+}))
+
 vi.mock('ai', () => aiMocks)
 
 vi.mock('~/ai/providers/registry', () => ({
@@ -31,6 +35,8 @@ vi.mock('~/ai/providers/registry', () => ({
 vi.mock('~/ai/interleaved-message-field', () => ({
 	getInterleavedMessageField: () => undefined,
 }))
+
+vi.mock('~/ai/transport/obsidian-fetch', () => transportMocks)
 
 function createProvider(): AIProviderConfig {
 	return {
@@ -68,6 +74,7 @@ describe('generateAssistantTurn', () => {
 		providerMocks.createLanguageModel.mockClear()
 		providerMocks.createImageModel.mockClear()
 		providerMocks.assertUsable.mockClear()
+		transportMocks.obsidianFetch.mockReset()
 	})
 
 	it('falls back to non-streaming text generation when the stream fails', async () => {
@@ -255,6 +262,101 @@ describe('generateAssistantTurn', () => {
 		expect(result.message).toEqual({
 			role: 'assistant',
 			content: [{ type: 'text', text: 'Minimal fallback answer' }],
+		})
+	})
+
+	it('falls back to a direct OpenAI-compatible request when SDK attempts fail', async () => {
+		aiMocks.generateText
+			.mockRejectedValueOnce(new Error('full context rejected'))
+			.mockRejectedValueOnce(new Error('tools rejected'))
+			.mockRejectedValueOnce(new Error('params rejected'))
+			.mockRejectedValueOnce(new Error('minimal sdk rejected'))
+		transportMocks.obsidianFetch.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					choices: [
+						{
+							message: {
+								content: 'Direct fallback answer',
+							},
+						},
+					],
+					usage: {
+						prompt_tokens: 4,
+						completion_tokens: 3,
+						total_tokens: 7,
+					},
+				}),
+				{
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				},
+			),
+		)
+		const updates: { delta: string; fullText: string }[] = []
+
+		const provider = createProvider()
+		provider.api = 'https://example.com'
+		const result = await generateAssistantTurn({
+			provider,
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Old question' }],
+				},
+				{
+					role: 'assistant',
+					content: [{ type: 'text', text: 'Old answer' }],
+				},
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Latest question' }],
+				},
+			],
+			tools: [],
+			onTextDelta: async (delta, fullText) => {
+				updates.push({ delta, fullText })
+			},
+		})
+
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(4)
+		expect(transportMocks.obsidianFetch).toHaveBeenCalledWith(
+			'https://example.com/v1/chat/completions',
+			expect.objectContaining({
+				method: 'POST',
+				headers: expect.objectContaining({
+					authorization: 'Bearer key',
+				}),
+			}),
+		)
+		expect(
+			JSON.parse(transportMocks.obsidianFetch.mock.calls[0][1].body),
+		).toMatchObject({
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: 'Latest question',
+				},
+			],
+			stream: false,
+		})
+		expect(updates).toEqual([
+			{ delta: 'Direct fallback answer', fullText: 'Direct fallback answer' },
+		])
+		expect(result).toMatchObject({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Direct fallback answer' }],
+			},
+			meta: {
+				usage: {
+					inputTokens: 4,
+					outputTokens: 3,
+					totalTokens: 7,
+				},
+			},
 		})
 	})
 
