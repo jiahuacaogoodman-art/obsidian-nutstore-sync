@@ -166,6 +166,92 @@ function toAISDKTools(tools: AIToolDefinition[]) {
 	)
 }
 
+function dataUrlFromBase64(value: string, mediaType = 'image/png') {
+	return value.startsWith('data:') ? value : `data:${mediaType};base64,${value}`
+}
+
+function contentPartFromRawPart(part: unknown): AIMessageContentPart[] {
+	if (typeof part === 'string') {
+		return toTextParts(part) || []
+	}
+	if (!part || typeof part !== 'object') {
+		return []
+	}
+	const value = part as Record<string, any>
+	const text =
+		typeof value.text === 'string'
+			? value.text
+			: typeof value.output_text === 'string'
+				? value.output_text
+				: undefined
+	const imageUrl =
+		typeof value.image_url === 'string'
+			? value.image_url
+			: typeof value.image_url?.url === 'string'
+				? value.image_url.url
+				: typeof value.url === 'string' && value.type?.includes?.('image')
+					? value.url
+					: undefined
+	const base64 =
+		typeof value.b64_json === 'string'
+			? value.b64_json
+			: typeof value.base64 === 'string'
+				? value.base64
+				: undefined
+
+	if (text) {
+		return [{ type: 'text', text }]
+	}
+	if (imageUrl) {
+		return [{ type: 'image_url', image_url: { url: imageUrl } }]
+	}
+	if (base64) {
+		return [
+			{
+				type: 'image_url',
+				image_url: {
+					url: dataUrlFromBase64(base64, value.mediaType || value.media_type),
+				},
+			},
+		]
+	}
+	if (Array.isArray(value.content)) {
+		return value.content.flatMap(contentPartFromRawPart)
+	}
+	return []
+}
+
+function contentPartsFromRawContent(content: unknown): AIMessageContentPart[] {
+	if (Array.isArray(content)) {
+		return content.flatMap(contentPartFromRawPart)
+	}
+	return contentPartFromRawPart(content)
+}
+
+function extractRawAssistantContentParts(body: unknown): AIMessageContentPart[] {
+	if (!body || typeof body !== 'object') {
+		return []
+	}
+	const value = body as Record<string, any>
+	const choiceParts = Array.isArray(value.choices)
+		? value.choices.flatMap((choice: any) =>
+				contentPartsFromRawContent(choice?.message?.content),
+			)
+		: []
+	if (choiceParts.length > 0) {
+		return choiceParts
+	}
+	if (typeof value.output_text === 'string') {
+		return toTextParts(value.output_text) || []
+	}
+	if (Array.isArray(value.output)) {
+		return value.output.flatMap((item: any) =>
+			contentPartsFromRawContent(item?.content ?? item),
+		)
+	}
+	return contentPartsFromRawContent(value.content)
+}
+
 function toAssistantMessage(
 	result: Pick<GenerateTextResult<any, any>, 'text' | 'toolCalls'> & {
 		files?: Array<{ base64: string; mediaType: string }>
@@ -189,9 +275,19 @@ function toAssistantMessage(
 				url: file.base64.startsWith('data:')
 					? file.base64
 					: `data:${file.mediaType};base64,${file.base64}`,
-			},
-		}))
-	const content = [...(toTextParts(result.text) || []), ...imageParts]
+				},
+			}))
+	const rawParts = result.text
+		? []
+		: extractRawAssistantContentParts(result.response?.body)
+	const usableRawParts = imageParts.length
+		? rawParts.filter((part) => part.type === 'text')
+		: rawParts
+	const content = [
+		...(toTextParts(result.text) || []),
+		...usableRawParts,
+		...imageParts,
+	]
 
 	const message: AIMessage =
 		toolCalls.length > 0

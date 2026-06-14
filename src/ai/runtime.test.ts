@@ -357,4 +357,47 @@ describe('generateAssistantTurn', () => {
 			],
 		})
 	})
+
+	it('uses raw response content when SDK text is empty', async () => {
+		aiMocks.generateText.mockResolvedValueOnce({
+			text: '',
+			toolCalls: [],
+			files: [],
+			usage: {
+				inputTokens: 3,
+				outputTokens: 2,
+				totalTokens: 5,
+			},
+			response: {
+				body: {
+					choices: [
+						{
+							message: {
+								content: [
+									{ type: 'text', text: 'Raw fallback answer' },
+								],
+							},
+						},
+					],
+				},
+			},
+		})
+
+		const result = await generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+			],
+			tools: [],
+		})
+
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Raw fallback answer' }],
+		})
+	})
 })
