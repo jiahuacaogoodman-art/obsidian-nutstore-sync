@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { generateAssistantTurn, generateImageTurn } from './runtime'
+import {
+	AI_REQUEST_TIMEOUT_MS,
+	generateAssistantTurn,
+	generateImageTurn,
+} from './runtime'
 import type { AIProviderConfig } from './types'
 
 const aiMocks = vi.hoisted(() => ({
@@ -66,6 +70,7 @@ function createProvider(): AIProviderConfig {
 
 describe('generateAssistantTurn', () => {
 	beforeEach(() => {
+		vi.useRealTimers()
 		aiMocks.generateText.mockReset()
 		aiMocks.streamText.mockReset()
 		aiMocks.generateImage.mockReset()
@@ -128,6 +133,57 @@ describe('generateAssistantTurn', () => {
 				outputTokens: 2,
 				totalTokens: 5,
 			},
+			})
+		})
+
+	it('falls back when a streaming response never completes', async () => {
+		vi.useFakeTimers()
+		aiMocks.streamText.mockReturnValueOnce({
+			textStream: (async function* () {
+				await new Promise(() => undefined)
+			})(),
+		})
+		aiMocks.generateText.mockResolvedValueOnce({
+			text: 'Recovered after stream timeout',
+			toolCalls: [],
+			usage: {
+				inputTokens: 3,
+				outputTokens: 2,
+				totalTokens: 5,
+			},
+			response: {},
+		})
+		const updates: { delta: string; fullText: string }[] = []
+
+		const promise = generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+			],
+			tools: [],
+			onTextDelta: async (delta, fullText) => {
+				updates.push({ delta, fullText })
+			},
+		})
+		await vi.advanceTimersByTimeAsync(AI_REQUEST_TIMEOUT_MS)
+		const result = await promise
+		vi.useRealTimers()
+
+		expect(aiMocks.streamText).toHaveBeenCalledTimes(1)
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(1)
+		expect(updates).toEqual([
+			{
+				delta: 'Recovered after stream timeout',
+				fullText: 'Recovered after stream timeout',
+			},
+		])
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Recovered after stream timeout' }],
 		})
 	})
 

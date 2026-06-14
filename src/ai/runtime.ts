@@ -53,6 +53,26 @@ export interface GenerateImageTurnResult {
 	prompt: string
 }
 
+export const AI_REQUEST_TIMEOUT_MS = 45_000
+
+function withTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	message: string,
+): Promise<T> {
+	let timeoutId: number | undefined
+	const timeout = new Promise<never>((_, reject) => {
+		timeoutId = globalThis.setTimeout(() => {
+			reject(new Error(message))
+		}, timeoutMs) as unknown as number
+	})
+	return Promise.race([promise, timeout]).finally(() => {
+		if (timeoutId !== undefined) {
+			globalThis.clearTimeout(timeoutId)
+		}
+	})
+}
+
 function toTextParts(text?: string | null): AIMessageContentPart[] | null {
 	if (!text) {
 		return null
@@ -435,7 +455,11 @@ export async function generateAssistantTurn(
 	)
 	if (request.onTextDelta && !interleavedField) {
 		try {
-			return await streamAssistantTurn(request)
+			return await withTimeout(
+				streamAssistantTurn(request),
+				AI_REQUEST_TIMEOUT_MS,
+				'Streaming request timed out; trying non-streaming fallback.',
+			)
 		} catch {
 			return generateTextAssistantTurnWithFallbacks(request, interleavedField)
 		}
@@ -461,10 +485,10 @@ async function generateTextAssistantTurnWithFallbacks(
 	let lastError: unknown
 	for (const options of attempts) {
 		try {
-			return await generateTextAssistantTurn(
-				request,
-				interleavedField,
-				options,
+			return await withTimeout(
+				generateTextAssistantTurn(request, interleavedField, options),
+				AI_REQUEST_TIMEOUT_MS,
+				'Text request timed out; trying safer fallback.',
 			)
 		} catch (error) {
 			lastError = error
@@ -515,23 +539,30 @@ async function generateTextAssistantTurnDirect(
 	let lastError: unknown
 	for (const url of getOpenAIChatCompletionURLs(request.provider.api)) {
 		try {
-			const response = await obsidianFetch(url, {
-				method: 'POST',
-				headers: {
-					'content-type': 'application/json',
-					authorization: `Bearer ${request.provider.apiKey}`,
-				},
-				body: JSON.stringify({
-					model: request.model,
-					messages,
-					stream: false,
+			const response = await withTimeout(
+				obsidianFetch(url, {
+					method: 'POST',
+					headers: {
+						'content-type': 'application/json',
+						authorization: `Bearer ${request.provider.apiKey}`,
+					},
+					body: JSON.stringify({
+						model: request.model,
+						messages,
+						stream: false,
+					}),
 				}),
-			})
+				AI_REQUEST_TIMEOUT_MS,
+				`Direct text request timed out: ${url}`,
+			)
+			if (!response) {
+				throw new Error(`Direct text request failed: ${url}`)
+			}
 			const body = await response.json().catch(() => undefined)
 			if (!response.ok) {
 				throw new Error(
 					typeof body?.error?.message === 'string'
-						? body.error.message
+						? `${body.error.message} (${url})`
 						: `Direct text request failed: ${response.status} ${response.statusText}`,
 				)
 			}
