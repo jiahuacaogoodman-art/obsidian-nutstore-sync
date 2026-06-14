@@ -692,6 +692,55 @@ describe('ChatService fragment workflows', () => {
 		)
 	})
 
+	it('keeps reference image attachments for image generation models', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: Buffer.from('png-bytes').toString('base64'),
+			mediaType: 'image/png',
+			prompt: 'Restyle this',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin } = createPluginWithVault()
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
+			id: 'gpt-image-2',
+			name: 'gpt-image-2',
+			modalities: { input: ['text'], output: ['text'] },
+		}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		expect(service.getViewProps().selectedModelSupportsImages).toBe(true)
+		await service.sendMessage({
+			text: 'Restyle this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'reference.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		const session = getActiveSession(service)
+		const userMessage = session.fragments[0].messages[0].message
+		expect(userMessage.content).toEqual([
+			{ type: 'text', text: 'Restyle this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
+		expect(generateImageTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Restyle this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
+	})
+
 	it('accepts data URL image results when storing generated images', async () => {
 		generateImageTurn.mockResolvedValueOnce({
 			contentBase64: `data:image/webp;base64,${Buffer.from('webp-bytes').toString('base64')}`,

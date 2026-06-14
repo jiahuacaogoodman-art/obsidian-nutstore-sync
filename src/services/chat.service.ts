@@ -161,6 +161,13 @@ function modelSupportsImageInput(model: { modalities?: { input?: string[] } }) {
 	return model.modalities?.input?.includes('image') ?? false
 }
 
+function modelAcceptsImageAttachments(model: {
+	id: string
+	modalities?: { input?: string[]; output?: string[] }
+}) {
+	return modelSupportsImageInput(model) || isImageGenerationModel(model)
+}
+
 function keepOnlyLatestUserImages(messages: AIMessage[]) {
 	let latestUserIndex = -1
 	for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -497,8 +504,9 @@ export default class ChatService {
 			})),
 			selectedProviderId: selectedProvider?.id,
 			selectedModelId: selectedModel?.id,
-			selectedModelSupportsImages:
-				selectedModel?.modalities?.input?.includes('image') ?? false,
+			selectedModelSupportsImages: selectedModel
+				? modelAcceptsImageAttachments(selectedModel)
+				: false,
 			inferenceParams: activeSession?.inferenceParams
 				? { ...activeSession.inferenceParams }
 				: undefined,
@@ -764,7 +772,7 @@ export default class ChatService {
 		}
 		const provider = this.getProviderOrThrow(session)
 		const model = this.getModelOrThrow(provider, session)
-		const attachments = modelSupportsImageInput(model) ? rawAttachments : []
+		const attachments = modelAcceptsImageAttachments(model) ? rawAttachments : []
 		if (!normalizedText && attachments.length === 0) {
 			return
 		}

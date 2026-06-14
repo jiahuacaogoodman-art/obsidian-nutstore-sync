@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { generateAssistantTurn } from './runtime'
+import { generateAssistantTurn, generateImageTurn } from './runtime'
 import type { AIProviderConfig } from './types'
 
 const aiMocks = vi.hoisted(() => ({
@@ -13,6 +13,10 @@ const aiMocks = vi.hoisted(() => ({
 const providerMocks = vi.hoisted(() => ({
 	createLanguageModel: vi.fn(() => ({
 		model: { modelId: 'model-1' },
+		providerName: 'Provider',
+	})),
+	createImageModel: vi.fn(() => ({
+		model: { modelId: 'gpt-image-2' },
 		providerName: 'Provider',
 	})),
 	assertUsable: vi.fn(),
@@ -62,6 +66,7 @@ describe('generateAssistantTurn', () => {
 		aiMocks.stepCountIs.mockClear()
 		aiMocks.tool.mockClear()
 		providerMocks.createLanguageModel.mockClear()
+		providerMocks.createImageModel.mockClear()
 		providerMocks.assertUsable.mockClear()
 	})
 
@@ -115,6 +120,63 @@ describe('generateAssistantTurn', () => {
 				inputTokens: 3,
 				outputTokens: 2,
 				totalTokens: 5,
+			},
+		})
+	})
+
+	it('passes text and reference images to image generation models', async () => {
+		aiMocks.generateImage.mockResolvedValueOnce({
+			image: {
+				base64: Buffer.from('png-bytes').toString('base64'),
+				mediaType: 'image/png',
+			},
+			usage: {
+				inputTokens: 4,
+				outputTokens: 1,
+				totalTokens: 5,
+			},
+		})
+
+		const result = await generateImageTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [
+						{ type: 'text', text: 'Restyle this' },
+						{
+							type: 'image_url',
+							image_url: { url: 'data:image/png;base64,AAAA' },
+						},
+					],
+				},
+			],
+		})
+
+		expect(providerMocks.createImageModel).toHaveBeenCalledTimes(1)
+		expect(aiMocks.generateImage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: {
+					text: 'Restyle this',
+					images: ['data:image/png;base64,AAAA'],
+				},
+				n: 1,
+			}),
+		)
+		expect(result).toMatchObject({
+			contentBase64: Buffer.from('png-bytes').toString('base64'),
+			mediaType: 'image/png',
+			prompt: 'Restyle this',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+				usage: {
+					inputTokens: 4,
+					outputTokens: 1,
+					totalTokens: 5,
+				},
 			},
 		})
 	})
