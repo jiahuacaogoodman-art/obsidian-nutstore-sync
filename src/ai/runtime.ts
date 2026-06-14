@@ -480,11 +480,11 @@ async function generateTextAssistantTurn(
 			: {
 					temperature: request.temperature,
 					maxOutputTokens: request.maxTokens,
-				}),
-		experimental_include: {
-			responseBody: !!interleavedField,
-		},
-	})
+			}),
+			experimental_include: {
+				responseBody: true,
+			},
+		})
 
 	if (request.onTextDelta && result.text) {
 		await request.onTextDelta(result.text, result.text)

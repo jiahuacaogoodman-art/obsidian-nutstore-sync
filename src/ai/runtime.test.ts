@@ -165,6 +165,7 @@ describe('generateAssistantTurn', () => {
 		expect(aiMocks.generateText.mock.calls[0][0]).toMatchObject({
 			temperature: 0.7,
 			maxOutputTokens: 1200,
+			experimental_include: { responseBody: true },
 		})
 		expect(Object.keys(aiMocks.generateText.mock.calls[0][0].tools)).toEqual([
 			'search',
