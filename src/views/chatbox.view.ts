@@ -5,7 +5,7 @@ import i18n from '~/i18n'
 import logger from '~/utils/logger'
 import type NutstorePlugin from '..'
 
-export const CHATBOX_VIEW_TYPE = 'nutstore-sync-chatbox'
+export const CHATBOX_VIEW_TYPE = 'guozha-ai-pro-chatbox'
 
 export default class ChatboxView extends ItemView {
 	private rootEl!: HTMLDivElement
@@ -76,7 +76,7 @@ export default class ChatboxView extends ItemView {
 	async onOpen() {
 		this.contentEl.empty()
 		this.rootEl = this.contentEl.createDiv({
-			cls: 'nutstore-chatbox-view h-full',
+			cls: 'guozha-chatbox-view h-full',
 		})
 		await this.plugin.chatService.ensureSession()
 		this.controller = mountChatbox(this.rootEl, this.getChatboxProps())

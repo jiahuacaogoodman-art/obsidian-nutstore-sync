@@ -76,10 +76,11 @@ export class SyncRibbonManager {
 	public update() {
 		if (this.plugin.isSyncing) {
 			this.startRibbonEl.setAttr('aria-disabled', 'true')
-			this.startRibbonEl.addClass('nutstore-sync-spinning')
+			this.startRibbonEl.addClass('guozha-ai-pro-spinning')
 			this.stopRibbonEl.classList.remove('hidden')
 		} else {
 			this.startRibbonEl.removeAttribute('aria-disabled')
+			this.startRibbonEl.removeClass('guozha-ai-pro-spinning')
 			this.startRibbonEl.removeClass('nutstore-sync-spinning')
 			this.stopRibbonEl.classList.add('hidden')
 		}
