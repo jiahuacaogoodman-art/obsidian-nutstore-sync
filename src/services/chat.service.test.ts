@@ -121,9 +121,13 @@ function createPluginWithTwoProviders() {
 	}
 }
 
-function createPluginWithVault(initialFiles: Record<string, string> = {}) {
+function createPluginWithVault(
+	initialFiles: Record<string, string> = {},
+	options: { createBinaryReturnsFile?: boolean } = {},
+) {
 	const files = new Map(Object.entries(initialFiles))
 	const folders = new Set<string>([''])
+	const createBinaryReturnsFile = options.createBinaryReturnsFile ?? true
 	const normalize = (path: string) => path.replace(/^\/+|\/+$/g, '')
 	const dirname = (path: string) =>
 		!path || !path.includes('/') ? '' : path.slice(0, path.lastIndexOf('/'))
@@ -179,7 +183,9 @@ function createPluginWithVault(initialFiles: Record<string, string> = {}) {
 						const normalized = normalize(path)
 						ensureFolder(dirname(normalized))
 						files.set(normalized, new TextDecoder().decode(data))
-						return getAbstractFileByPath(normalized)
+						return createBinaryReturnsFile
+							? getAbstractFileByPath(normalized)
+							: undefined
 					},
 					getResourcePath(file: { path: string }) {
 						return `app://vault/${file.path}`
@@ -718,7 +724,7 @@ describe('ChatService fragment workflows', () => {
 		const assistantMessage = session.fragments[0].messages[1].message
 		expect(assistantMessage.content?.[0]).toEqual({
 			type: 'text',
-			text: `Generated image saved to ${generatedPath}`,
+			text: `已生成图片：${generatedPath}`,
 		})
 		expect(assistantMessage.content?.[1]).toEqual({
 			type: 'image_url',
@@ -732,6 +738,50 @@ describe('ChatService fragment workflows', () => {
 				model: 'gpt-image-2',
 			}),
 		)
+	})
+
+	it('renders generated images when createBinary does not return a file object', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: Buffer.from('png-bytes').toString('base64'),
+			mediaType: 'image/png',
+			prompt: 'Draw a lamp',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault(
+			{},
+			{ createBinaryReturnsFile: false },
+		)
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
+			id: 'gpt-image-2',
+			name: 'gpt-image-2',
+		}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Draw a lamp')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toBeTruthy()
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content?.[1]).toEqual({
+			type: 'image_url',
+			image_url: {
+				url: `app://vault/${generatedPath}`,
+			},
+		})
 	})
 
 	it('keeps reference image attachments for image generation models', async () => {

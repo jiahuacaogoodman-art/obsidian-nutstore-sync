@@ -1487,7 +1487,7 @@ export default class ChatService {
 						content: [
 							{
 								type: 'text',
-								text: `Generated image saved to ${generatedImage.path}`,
+								text: `已生成图片：${generatedImage.path}`,
 							},
 							{
 								type: 'image_url',
@@ -2412,6 +2412,15 @@ export default class ChatService {
 		return undefined
 	}
 
+	private async createVaultBinary(path: string, data: ArrayBuffer) {
+		const vault = this.plugin.app.vault as {
+			createBinary: (path: string, data: ArrayBuffer) => Promise<unknown>
+			getAbstractFileByPath?: (path: string) => unknown
+		}
+		const created = await vault.createBinary(path, data)
+		return created || vault.getAbstractFileByPath?.(path)
+	}
+
 	private async saveGeneratedImage(contentBase64: string, mediaType: string) {
 		await this.ensureVaultDirectory(AI_GENERATED_IMAGES_DIR)
 		const image = normalizeImageContent(contentBase64, mediaType)
@@ -2428,7 +2437,7 @@ export default class ChatService {
 			)
 			suffix += 1
 		}
-		const file = await this.plugin.app.vault.createBinary(path, data)
+		const file = await this.createVaultBinary(path, data)
 		return {
 			path,
 			url: this.getVaultResourceUrl(path, file) || image.dataUrl,
