@@ -43,10 +43,10 @@ const storageState = vi.hoisted(() => {
 
 const { generateAssistantTurn, generateImageTurn, assertProviderUsable } =
 	vi.hoisted(() => ({
-	generateAssistantTurn: vi.fn(),
-	generateImageTurn: vi.fn(),
-	assertProviderUsable: vi.fn(),
-}))
+		generateAssistantTurn: vi.fn(),
+		generateImageTurn: vi.fn(),
+		assertProviderUsable: vi.fn(),
+	}))
 
 vi.mock('~/ai/runtime', () => ({
 	generateAssistantTurn,
@@ -121,9 +121,13 @@ function createPluginWithTwoProviders() {
 	}
 }
 
-function createPluginWithVault(initialFiles: Record<string, string> = {}) {
+function createPluginWithVault(
+	initialFiles: Record<string, string> = {},
+	options: { createBinaryReturnsFile?: boolean } = {},
+) {
 	const files = new Map(Object.entries(initialFiles))
 	const folders = new Set<string>([''])
+	const createBinaryReturnsFile = options.createBinaryReturnsFile ?? true
 	const normalize = (path: string) => path.replace(/^\/+|\/+$/g, '')
 	const dirname = (path: string) =>
 		!path || !path.includes('/') ? '' : path.slice(0, path.lastIndexOf('/'))
@@ -166,8 +170,10 @@ function createPluginWithVault(initialFiles: Record<string, string> = {}) {
 			app: {
 				vault: {
 					getAbstractFileByPath,
-					getResourcePath(path: string) {
-						return `app://local/${path}`
+					adapter: {
+						getResourcePath(path: string) {
+							return `app://local/${path}`
+						},
 					},
 					async createFolder(path: string) {
 						ensureFolder(path)
@@ -177,7 +183,12 @@ function createPluginWithVault(initialFiles: Record<string, string> = {}) {
 						const normalized = normalize(path)
 						ensureFolder(dirname(normalized))
 						files.set(normalized, new TextDecoder().decode(data))
-						return getAbstractFileByPath(normalized)
+						return createBinaryReturnsFile
+							? getAbstractFileByPath(normalized)
+							: undefined
+					},
+					getResourcePath(file: { path: string }) {
+						return `app://vault/${file.path}`
 					},
 					async modifyBinary(file: any, data: ArrayBuffer) {
 						files.set(normalize(file.path), new TextDecoder().decode(data))
@@ -378,7 +389,29 @@ describe('ChatService fragment workflows', () => {
 		expect(service.getViewProps().pendingMessages).toHaveLength(0)
 	})
 
-	it('sends image attachments as user message content parts', async () => {
+	it('removes the empty streaming placeholder when generation fails', async () => {
+		generateAssistantTurn.mockRejectedValueOnce(
+			new Error('No output generated. Check the stream for errors.'),
+		)
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		await service.sendMessage('Hello')
+
+		const session = getActiveSession(service)
+		const fragment = session.fragments[0]
+		expect(service.getViewProps().runState).toBe('idle')
+		expect(fragment.messages).toHaveLength(2)
+		expect(fragment.messages[0].message.role).toBe('user')
+		expect(fragment.messages[1].message.role).toBe('assistant')
+		expect(fragment.messages[1].isError).toBe(true)
+		expect(fragment.messages[1].message.content?.[0]).toEqual({
+			type: 'text',
+			text: 'No output generated. Check the stream for errors.',
+		})
+	})
+
+	it('stores image attachments and omits them for text-only models', async () => {
 		generateAssistantTurn.mockResolvedValueOnce({
 			message: {
 				role: 'assistant',
@@ -408,11 +441,90 @@ describe('ChatService fragment workflows', () => {
 		const userMessage = session.fragments[0].messages[0].message
 		expect(userMessage.content).toEqual([
 			{ type: 'text', text: 'Describe this' },
+		])
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+		])
+	})
+
+	it('stores image attachments for image-capable chat models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Image received' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const plugin = createPlugin() as any
+		plugin.settings.ai.providers['provider-1'].models['model-1'].modalities = {
+			input: ['text', 'image'],
+			output: ['text'],
+		}
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage({
+			text: 'Describe this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'image.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		const session = getActiveSession(service)
+		const userMessage = session.fragments[0].messages[0].message
+		expect(userMessage.content).toEqual([
+			{ type: 'text', text: 'Describe this' },
 			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
 		])
-		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual(
-			userMessage.content,
-		)
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
+	})
+
+	it('sends latest image attachments to image-capable chat models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Image received' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const plugin = createPlugin() as any
+		plugin.settings.ai.providers['provider-1'].models['model-1'].modalities = {
+			input: ['text', 'image'],
+			output: ['text'],
+		}
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage({
+			text: 'Describe this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'image.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		expect(generateAssistantTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Describe this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
 	})
 
 	it('updates the assistant message while text is streaming', async () => {
@@ -444,6 +556,180 @@ describe('ChatService fragment workflows', () => {
 		})
 	})
 
+	it('returns fresh timeline message snapshots for streaming UI updates', async () => {
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		const session = getActiveSession(service)
+		const fragment = session.fragments[0]
+		const record = (service as any).createMessageRecord({
+			role: 'assistant',
+			content: [{ type: 'text', text: '' }],
+		})
+		fragment.messages.push(record)
+
+		const firstTimelineMessage = service
+			.getViewProps()
+			.timeline.find((item) => item.kind === 'message')
+		record.message = {
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Live reply' }],
+		}
+		const secondTimelineMessage = service
+			.getViewProps()
+			.timeline.find((item) => item.kind === 'message')
+
+		expect(firstTimelineMessage?.kind).toBe('message')
+		expect(secondTimelineMessage?.kind).toBe('message')
+		if (
+			firstTimelineMessage?.kind !== 'message' ||
+			secondTimelineMessage?.kind !== 'message'
+		) {
+			throw new Error('Expected message timeline items')
+		}
+		expect(firstTimelineMessage.message).not.toBe(record)
+		expect(secondTimelineMessage.message).not.toBe(record)
+		expect(secondTimelineMessage.message).not.toBe(firstTimelineMessage.message)
+		expect(secondTimelineMessage.message.message.content?.[0]).toEqual({
+			type: 'text',
+			text: 'Live reply',
+		})
+	})
+
+	it('stores assistant image parts produced by language models in the vault', async () => {
+		const outputBase64 = Buffer.from('language-image').toString('base64')
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [
+					{ type: 'text', text: 'Here is the image' },
+					{
+						type: 'image_url',
+						image_url: { url: `data:image/png;base64,${outputBase64}` },
+					},
+				],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault()
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Generate an image')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toBeTruthy()
+		expect(files.get(generatedPath!)).toBe('language-image')
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content).toEqual([
+			{ type: 'text', text: 'Here is the image' },
+			{
+				type: 'image_url',
+				image_url: { url: `app://vault/${generatedPath}` },
+			},
+		])
+	})
+
+	it('does not replay generated assistant image data to text models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Continued' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		const session = getActiveSession(service)
+		session.fragments[0].messages.push(
+			(service as any).createMessageRecord({
+				role: 'user',
+				content: [{ type: 'text', text: 'Draw a thing' }],
+			}),
+			(service as any).createMessageRecord({
+				role: 'assistant',
+				content: [
+					{ type: 'text', text: 'Generated image saved to image.png' },
+					{
+						type: 'image_url',
+						image_url: { url: 'data:image/png;base64,AAAA' },
+					},
+				],
+			}),
+		)
+
+		await service.sendMessage('Now talk normally')
+
+		const requestMessages = generateAssistantTurn.mock.calls[0][0].messages
+		const assistantHistory = requestMessages.find(
+			(message: any) => message.role === 'assistant',
+		)
+		expect(assistantHistory.content).toEqual([
+			{ type: 'text', text: 'Generated image saved to image.png' },
+		])
+	})
+
+	it('does not replay user image attachments to text-only models', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Continued' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		const session = getActiveSession(service)
+		session.fragments[0].messages.push(
+			(service as any).createMessageRecord({
+				role: 'user',
+				content: [
+					{ type: 'text', text: 'Describe this old image' },
+					{
+						type: 'image_url',
+						image_url: { url: 'data:image/png;base64,AAAA' },
+					},
+				],
+			}),
+			(service as any).createMessageRecord({
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Old image description' }],
+			}),
+		)
+
+		await service.sendMessage('Now talk normally')
+
+		const requestMessages = generateAssistantTurn.mock.calls[0][0].messages
+		const oldUser = requestMessages.find(
+			(message: any) =>
+				message.role === 'user' &&
+				message.content?.some?.(
+					(part: any) =>
+						part.type === 'text' && part.text.includes('old image'),
+				),
+		)
+		expect(oldUser.content).toEqual([
+			{ type: 'text', text: 'Describe this old image' },
+		])
+	})
+
 	it('generates images with image models and stores them in the vault', async () => {
 		generateImageTurn.mockResolvedValueOnce({
 			contentBase64: Buffer.from('png-bytes').toString('base64'),
@@ -457,10 +743,11 @@ describe('ChatService fragment workflows', () => {
 		})
 
 		const { plugin, files } = createPluginWithVault()
-		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] = {
-			id: 'gpt-image-2',
-			name: 'gpt-image-2',
-		}
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+			}
 		plugin.settings.ai.defaultModel = {
 			providerId: 'provider-1',
 			modelId: 'gpt-image-2',
@@ -480,11 +767,13 @@ describe('ChatService fragment workflows', () => {
 		const assistantMessage = session.fragments[0].messages[1].message
 		expect(assistantMessage.content?.[0]).toEqual({
 			type: 'text',
-			text: `Generated image saved to ${generatedPath}`,
+			text: `已生成图片：${generatedPath}`,
 		})
 		expect(assistantMessage.content?.[1]).toEqual({
 			type: 'image_url',
-			image_url: { url: `app://local/${generatedPath}` },
+			image_url: {
+				url: `app://vault/${generatedPath}`,
+			},
 		})
 		expect(generateAssistantTurn).not.toHaveBeenCalled()
 		expect(generateImageTurn).toHaveBeenCalledWith(
@@ -492,6 +781,146 @@ describe('ChatService fragment workflows', () => {
 				model: 'gpt-image-2',
 			}),
 		)
+	})
+
+	it('renders generated images when createBinary does not return a file object', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: Buffer.from('png-bytes').toString('base64'),
+			mediaType: 'image/png',
+			prompt: 'Draw a lamp',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault(
+			{},
+			{ createBinaryReturnsFile: false },
+		)
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+			}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Draw a lamp')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toBeTruthy()
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content?.[1]).toEqual({
+			type: 'image_url',
+			image_url: {
+				url: `app://vault/${generatedPath}`,
+			},
+		})
+	})
+
+	it('keeps reference image attachments for image generation models', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: Buffer.from('png-bytes').toString('base64'),
+			mediaType: 'image/png',
+			prompt: 'Restyle this',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin } = createPluginWithVault()
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+				modalities: { input: ['text'], output: ['text'] },
+			}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		expect(service.getViewProps().selectedModelSupportsImages).toBe(true)
+		await service.sendMessage({
+			text: 'Restyle this',
+			attachments: [
+				{
+					id: 'image-1',
+					name: 'reference.png',
+					url: 'data:image/png;base64,AAAA',
+				},
+			],
+		})
+
+		const session = getActiveSession(service)
+		const userMessage = session.fragments[0].messages[0].message
+		expect(userMessage.content).toEqual([
+			{ type: 'text', text: 'Restyle this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
+		expect(generateImageTurn.mock.calls[0][0].messages[1].content).toEqual([
+			{ type: 'text', text: 'Restyle this' },
+			{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
+		])
+	})
+
+	it('accepts data URL image results when storing generated images', async () => {
+		generateImageTurn.mockResolvedValueOnce({
+			contentBase64: `data:image/webp;base64,${Buffer.from('webp-bytes').toString('base64')}`,
+			mediaType: 'image/png',
+			prompt: 'Draw a comet',
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'gpt-image-2',
+			},
+		})
+
+		const { plugin, files } = createPluginWithVault()
+		delete (plugin.app.vault as any).getResourcePath
+		delete (plugin.app.vault.adapter as any).getResourcePath
+		;(plugin.settings.ai.providers['provider-1'].models as any)['gpt-image-2'] =
+			{
+				id: 'gpt-image-2',
+				name: 'gpt-image-2',
+			}
+		plugin.settings.ai.defaultModel = {
+			providerId: 'provider-1',
+			modelId: 'gpt-image-2',
+		}
+
+		const service = new ChatService(plugin as never)
+		await service.ensureSession()
+		await service.sendMessage('Draw a comet')
+
+		const generatedPath = [...files.keys()].find((path) =>
+			path.startsWith('AI Generated Images/image-'),
+		)
+		expect(generatedPath).toMatch(/\.webp$/)
+		expect(files.get(generatedPath!)).toBe('webp-bytes')
+
+		const session = getActiveSession(service)
+		const assistantMessage = session.fragments[0].messages[1].message
+		expect(assistantMessage.content?.[1]).toEqual({
+			type: 'image_url',
+			image_url: {
+				url: `data:image/webp;base64,${Buffer.from('webp-bytes').toString('base64')}`,
+			},
+		})
 	})
 
 	it('persists interleaved assistant fields on the message and forwards them on every subsequent turn', async () => {
@@ -635,8 +1064,7 @@ describe('ChatService fragment workflows', () => {
 		await reloadedService.ensureSession()
 		await reloadedService.sendMessage('After reload')
 
-		const messagesAfterReload =
-			generateAssistantTurn.mock.calls[2][0].messages
+		const messagesAfterReload = generateAssistantTurn.mock.calls[2][0].messages
 		const replayedAssistant = messagesAfterReload.find(
 			(message: any) =>
 				message.role === 'assistant' && message.interleaved !== undefined,
@@ -1162,6 +1590,53 @@ describe('ChatService fragment workflows', () => {
 			status: 'cancelled',
 			cancelReason: 'interrupted_by_restart',
 		})
+	})
+
+	it('removes empty assistant placeholders during rehydration', async () => {
+		generateAssistantTurn.mockResolvedValueOnce({
+			message: {
+				role: 'assistant',
+				content: [{ type: 'text', text: 'Initial response' }],
+			},
+			meta: {
+				providerId: 'provider-1',
+				providerName: 'Provider',
+				modelName: 'model-a',
+			},
+		})
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		await service.sendMessage('Original message')
+
+		const sessionId = service.getViewProps().activeSessionId!
+		const stored = await storageState.chatSessionKV.get(sessionId)
+		stored.fragments[0].messages.push({
+			id: 'empty-assistant',
+			createdAt: 3,
+			updatedAt: 3,
+			message: {
+				role: 'assistant',
+				content: null,
+			},
+		})
+		await storageState.chatSessionKV.set(sessionId, stored)
+
+		const reloadedService = new ChatService(createPlugin() as never)
+		await reloadedService.ensureSession()
+
+		const reloaded = getActiveSession(reloadedService)
+		expect(
+			reloaded.fragments[0].messages.some(
+				(item: any) => item.id === 'empty-assistant',
+			),
+		).toBe(false)
+		const persisted = await storageState.chatSessionKV.get(sessionId)
+		expect(
+			persisted.fragments[0].messages.some(
+				(item: any) => item.id === 'empty-assistant',
+			),
+		).toBe(false)
 	})
 
 	it('coerces numeric string arguments before executing tools', async () => {

@@ -70,7 +70,7 @@ function App(props: AppProps) {
 			.length +
 		props.otherSessionTasks.filter((task) => task.status === 'running').length
 	const isBusy = () => props.runState !== 'idle'
-	const canAttachImages = () => !!props.selectedModelId
+	const canAttachImages = () => !!props.selectedModelSupportsImages
 	const currentTemperature = () => props.inferenceParams?.temperature ?? 0.7
 	const currentMaxTokens = () => props.inferenceParams?.maxTokens ?? 1200
 	const selectedProvider = () =>
@@ -286,7 +286,7 @@ function App(props: AppProps) {
 
 	async function submit() {
 		const text = input().trim()
-		const selectedAttachments = attachments()
+		const selectedAttachments = canAttachImages() ? attachments() : []
 		if ((!text && selectedAttachments.length === 0) || !props.canSend) {
 			return
 		}

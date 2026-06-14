@@ -38,6 +38,7 @@ import {
 	ChatRunState,
 	ChatSessionIndexItem,
 	cloneMessage,
+	cloneMessageRecord,
 	cloneReversibleToolOp,
 	cloneSession,
 	createQueuedTask,
@@ -137,6 +138,57 @@ function messageToText(message: Pick<ChatMessage, 'content'> | AIMessage) {
 		.join('\n')
 }
 
+function stripAssistantImageParts(message: AIMessage): AIMessage {
+	if (message.role !== 'assistant' || !message.content?.length) {
+		return message
+	}
+	return {
+		...message,
+		content: message.content.filter((part) => part.type !== 'image_url'),
+	}
+}
+
+function stripImageParts(message: AIMessage): AIMessage {
+	if (!('content' in message) || !message.content?.length) {
+		return message
+	}
+	return {
+		...message,
+		content: message.content.filter((part) => part.type !== 'image_url'),
+	} as AIMessage
+}
+
+function modelSupportsImageInput(model: { modalities?: { input?: string[] } }) {
+	return model.modalities?.input?.includes('image') ?? false
+}
+
+function modelAcceptsImageAttachments(model: {
+	id: string
+	modalities?: { input?: string[]; output?: string[] }
+}) {
+	return modelSupportsImageInput(model) || isImageGenerationModel(model)
+}
+
+function keepOnlyLatestUserImages(messages: AIMessage[]) {
+	let latestUserIndex = -1
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		if (messages[index].role === 'user') {
+			latestUserIndex = index
+			break
+		}
+	}
+
+	return messages.map((message, index) => {
+		if (message.role === 'assistant') {
+			return stripAssistantImageParts(message)
+		}
+		if (message.role === 'user' && index !== latestUserIndex) {
+			return stripImageParts(message)
+		}
+		return message
+	})
+}
+
 function getAssistantToolCalls(message: ChatMessage) {
 	return message.role === 'assistant' ? message.tool_calls : undefined
 }
@@ -195,6 +247,17 @@ function decodeBase64ToArrayBuffer(contentBase64: string) {
 	) as ArrayBuffer
 }
 
+function normalizeImageContent(content: string, mediaType: string) {
+	const match = content.match(/^data:([^;,]+)?;base64,(.*)$/)
+	const normalizedMediaType = match?.[1] || mediaType || 'image/png'
+	const base64 = match?.[2] || content
+	return {
+		base64,
+		mediaType: normalizedMediaType,
+		dataUrl: `data:${normalizedMediaType};base64,${base64}`,
+	}
+}
+
 function getImageExtension(mediaType: string) {
 	switch (mediaType.toLowerCase()) {
 		case 'image/jpeg':
@@ -220,6 +283,24 @@ function isImageGenerationModel(model: {
 		id.startsWith('dall-e') ||
 		id.includes('image-generation')
 	)
+}
+
+function removeEmptyAssistantPlaceholders(fragment: ChatFragment) {
+	const initialLength = fragment.messages.length
+	fragment.messages = fragment.messages.filter((record) => {
+		if (record.isError || record.message.role !== 'assistant') {
+			return true
+		}
+		const hasContent = (record.message.content || []).some((part) => {
+			if (part.type === 'text') {
+				return part.text.length > 0
+			}
+			return true
+		})
+		const hasToolCalls = !!record.message.tool_calls?.length
+		return hasContent || hasToolCalls
+	})
+	return fragment.messages.length !== initialLength
 }
 
 function createTimestampSlug() {
@@ -424,17 +505,20 @@ export default class ChatService {
 			})),
 			selectedProviderId: selectedProvider?.id,
 			selectedModelId: selectedModel?.id,
-			selectedModelSupportsImages:
-				selectedModel?.modalities?.input?.includes('image') ?? false,
+			selectedModelSupportsImages: selectedModel
+				? modelAcceptsImageAttachments(selectedModel)
+				: false,
 			inferenceParams: activeSession?.inferenceParams
 				? { ...activeSession.inferenceParams }
 				: undefined,
 			runState: activeRuntime.runState,
 			pendingMessages: activeRuntime.pendingMessages.map((item) => ({
 				...item,
-				attachments: item.attachments?.map((attachment: ChatImageAttachment) => ({
-					...attachment,
-				})),
+				attachments: item.attachments?.map(
+					(attachment: ChatImageAttachment) => ({
+						...attachment,
+					}),
+				),
 			})),
 			canSend: true,
 			canCreateFragment: !!activeSession && activeRuntime.runState === 'idle',
@@ -677,16 +761,24 @@ export default class ChatService {
 		const normalizedPayload =
 			typeof payload === 'string' ? { text: payload } : payload
 		const normalizedText = normalizedPayload.text.trim()
-		const attachments = (normalizedPayload.attachments || []).filter(
+		const rawAttachments = (normalizedPayload.attachments || []).filter(
 			(attachment) => !!attachment.url,
 		)
-		if (!normalizedText && attachments.length === 0) {
+		if (!normalizedText && rawAttachments.length === 0) {
 			return
 		}
 
 		const session =
 			this.getLoadedActiveSession() || (await this.createSession())
 		if (!session || !this.validateSessionSelection(session)) {
+			return
+		}
+		const provider = this.getProviderOrThrow(session)
+		const model = this.getModelOrThrow(provider, session)
+		const attachments = modelAcceptsImageAttachments(model)
+			? rawAttachments
+			: []
+		if (!normalizedText && attachments.length === 0) {
 			return
 		}
 
@@ -1078,6 +1170,12 @@ export default class ChatService {
 	private rehydrateSession(session: AISession) {
 		const rehydrated = this.normalizeSession(session)
 		let changed = this.sanitizeSessionSelection(rehydrated)
+		for (const fragment of rehydrated.fragments) {
+			if (removeEmptyAssistantPlaceholders(fragment)) {
+				fragment.updatedAt = Date.now()
+				changed = true
+			}
+		}
 
 		for (const task of rehydrated.tasks) {
 			if (task.status !== 'queued' && task.status !== 'running') {
@@ -1237,6 +1335,16 @@ export default class ChatService {
 			const items = fragment.messages.flatMap((message) => {
 				const toolMessage =
 					message.message.role === 'tool' ? message.message : undefined
+				const toolCall = toolMessage
+					? flattenedMessages
+							.slice(
+								0,
+								flattenedMessages.findIndex((item) => item.id === message.id),
+							)
+							.reverse()
+							.flatMap((item) => getAssistantToolCalls(item.message) || [])
+							.find((toolCall) => toolCall.id === toolMessage.tool_call_id)
+					: undefined
 				if (
 					message.message.role === 'assistant' &&
 					!messageToText(message.message).trim() &&
@@ -1253,18 +1361,12 @@ export default class ChatService {
 						id: `message:${message.id}`,
 						kind: 'message' as const,
 						createdAt: message.createdAt,
-						message,
-						toolCall: toolMessage
-							? flattenedMessages
-									.slice(
-										0,
-										flattenedMessages.findIndex(
-											(item) => item.id === message.id,
-										),
-									)
-									.reverse()
-									.flatMap((item) => getAssistantToolCalls(item.message) || [])
-									.find((toolCall) => toolCall.id === toolMessage.tool_call_id)
+						message: cloneMessageRecord(message),
+						toolCall: toolCall
+							? {
+									...toolCall,
+									function: { ...toolCall.function },
+								}
 							: undefined,
 					},
 				]
@@ -1354,7 +1456,16 @@ export default class ChatService {
 				this.notify()
 
 				const tools = this.createToolsForContext(session, 0, MAX_TASK_DEPTH)
-				const requestMessages = this.buildMessagesForFragment(fragment, session)
+				const isImageModel = isImageGenerationModel(model)
+				const fragmentMessages = this.buildMessagesForFragment(
+					fragment,
+					session,
+				)
+				const requestMessages = isImageModel
+					? fragmentMessages
+					: modelSupportsImageInput(model)
+						? keepOnlyLatestUserImages(fragmentMessages)
+						: fragmentMessages.map(stripImageParts)
 				let lastStreamPersistedAt = 0
 				const streamingRecord = this.createMessageRecord({
 					role: 'assistant',
@@ -1365,7 +1476,7 @@ export default class ChatService {
 				session.updatedAt = Date.now()
 				this.notify()
 
-				if (isImageGenerationModel(model)) {
+				if (isImageModel) {
 					const response = await generateImageTurn({
 						provider,
 						model: model.id,
@@ -1379,7 +1490,7 @@ export default class ChatService {
 						return
 					}
 
-					const imagePath = await this.saveGeneratedImage(
+					const generatedImage = await this.saveGeneratedImage(
 						response.contentBase64,
 						response.mediaType,
 					)
@@ -1388,12 +1499,12 @@ export default class ChatService {
 						content: [
 							{
 								type: 'text',
-								text: `Generated image saved to ${imagePath}`,
+								text: `已生成图片：${generatedImage.path}`,
 							},
 							{
 								type: 'image_url',
 								image_url: {
-									url: this.plugin.app.vault.getResourcePath(imagePath as never),
+									url: generatedImage.url,
 								},
 							},
 						],
@@ -1405,7 +1516,7 @@ export default class ChatService {
 					runtime.stopRequested = false
 					await this.persistSession(session)
 					this.notify()
-					continue
+					return
 				}
 
 				const response = await generateAssistantTurn({
@@ -1436,7 +1547,9 @@ export default class ChatService {
 					return
 				}
 
-				streamingRecord.message = response.message
+				streamingRecord.message = await this.persistAssistantImages(
+					response.message,
+				)
 				streamingRecord.meta = { ...response.meta, modelId: model.id }
 				fragment.updatedAt = Date.now()
 				session.updatedAt = Date.now()
@@ -1453,7 +1566,11 @@ export default class ChatService {
 				const assistantToolCalls = getAssistantToolCalls(response.message)
 				if (!assistantToolCalls?.length) {
 					runtime.runState = 'idle'
-					continue
+					this.notify()
+					if (runtime.pendingMessages.length > 0) {
+						continue
+					}
+					return
 				}
 
 				repeatState = updateToolCallRepeatState(repeatState, assistantToolCalls)
@@ -1516,6 +1633,11 @@ export default class ChatService {
 				session.model?.providerId,
 			)
 			const activeModel = getModelById(activeProvider, session.model?.modelId)
+			const fragment = this.getActiveFragment(session)
+			if (removeEmptyAssistantPlaceholders(fragment)) {
+				fragment.updatedAt = Date.now()
+				session.updatedAt = Date.now()
+			}
 			this.reportFatalError(
 				session,
 				error instanceof Error
@@ -1527,7 +1649,7 @@ export default class ChatService {
 					modelId: activeModel?.id,
 					modelName: activeModel?.name,
 				},
-				this.getActiveFragment(session),
+				fragment,
 			)
 			runtime.runState = 'idle'
 			await this.persistSession(session)
@@ -2273,10 +2395,50 @@ export default class ChatService {
 		await this.plugin.app.vault.createFolder(path)
 	}
 
+	private getVaultResourceUrl(path: string, target?: unknown) {
+		const vault = this.plugin.app.vault as {
+			getResourcePath?: (file: unknown) => string
+			adapter?: { getResourcePath?: (path: string) => string }
+			getAbstractFileByPath?: (path: string) => unknown
+		}
+		const file = target || vault.getAbstractFileByPath?.(path)
+		if (file && typeof vault.getResourcePath === 'function') {
+			try {
+				const url = vault.getResourcePath(file)
+				if (url) {
+					return url
+				}
+			} catch (error) {
+				logger.error(error)
+			}
+		}
+		if (typeof vault.adapter?.getResourcePath === 'function') {
+			try {
+				const url = vault.adapter.getResourcePath(path)
+				if (url) {
+					return url
+				}
+			} catch (error) {
+				logger.error(error)
+			}
+		}
+		return undefined
+	}
+
+	private async createVaultBinary(path: string, data: ArrayBuffer) {
+		const vault = this.plugin.app.vault as {
+			createBinary: (path: string, data: ArrayBuffer) => Promise<unknown>
+			getAbstractFileByPath?: (path: string) => unknown
+		}
+		const created = await vault.createBinary(path, data)
+		return created || vault.getAbstractFileByPath?.(path)
+	}
+
 	private async saveGeneratedImage(contentBase64: string, mediaType: string) {
 		await this.ensureVaultDirectory(AI_GENERATED_IMAGES_DIR)
-		const data = decodeBase64ToArrayBuffer(contentBase64)
-		const extension = getImageExtension(mediaType)
+		const image = normalizeImageContent(contentBase64, mediaType)
+		const data = decodeBase64ToArrayBuffer(image.base64)
+		const extension = getImageExtension(image.mediaType)
 		const baseName = `image-${createTimestampSlug()}`
 		let path = normalizePath(
 			`${AI_GENERATED_IMAGES_DIR}/${baseName}.${extension}`,
@@ -2288,8 +2450,40 @@ export default class ChatService {
 			)
 			suffix += 1
 		}
-		await this.plugin.app.vault.createBinary(path, data)
-		return path
+		const file = await this.createVaultBinary(path, data)
+		return {
+			path,
+			url: this.getVaultResourceUrl(path, file) || image.dataUrl,
+		}
+	}
+
+	private async persistAssistantImages(message: AIMessage) {
+		if (message.role !== 'assistant' || !message.content?.length) {
+			return message
+		}
+		const content = await Promise.all(
+			message.content.map(async (part) => {
+				if (
+					part.type !== 'image_url' ||
+					!part.image_url.url.startsWith('data:')
+				) {
+					return part
+				}
+				const image = normalizeImageContent(part.image_url.url, 'image/png')
+				const saved = await this.saveGeneratedImage(
+					image.base64,
+					image.mediaType,
+				)
+				return {
+					type: 'image_url' as const,
+					image_url: { url: saved.url },
+				}
+			}),
+		)
+		return {
+			...message,
+			content,
+		}
 	}
 
 	private async writeVaultFile(path: string, contentBase64: string) {
