@@ -71,6 +71,8 @@ function createProvider(): AIProviderConfig {
 describe('generateAssistantTurn', () => {
 	beforeEach(() => {
 		vi.useRealTimers()
+		vi.stubGlobal('fetch', vi.fn())
+		vi.stubGlobal('require', undefined)
 		aiMocks.generateText.mockReset()
 		aiMocks.streamText.mockReset()
 		aiMocks.generateImage.mockReset()
@@ -82,23 +84,126 @@ describe('generateAssistantTurn', () => {
 		transportMocks.obsidianFetch.mockReset()
 	})
 
-	it('uses the direct OpenAI-compatible request first for plain user text', async () => {
-		transportMocks.obsidianFetch.mockResolvedValueOnce(
+	it('uses the direct OpenAI-compatible streaming request first for plain user text', async () => {
+		const fetchMock = vi.mocked(globalThis.fetch)
+		fetchMock.mockResolvedValueOnce(
 			new Response(
-				JSON.stringify({
-					choices: [
-						{
-							message: {
-								content: 'Direct first answer',
-							},
-						},
-					],
-				}),
+				[
+					'data: {"choices":[{"delta":{"content":"Direct "}}]}\n\n',
+					'data: {"choices":[{"delta":{"content":"stream answer"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}\n\n',
+					'data: [DONE]\n\n',
+				].join(''),
 				{
 					status: 200,
-					headers: { 'content-type': 'application/json' },
+					headers: { 'content-type': 'text/event-stream' },
 				},
 			),
+		)
+		const updates: { delta: string; fullText: string }[] = []
+
+		const provider = createProvider()
+		provider.api = 'https://example.com'
+		const result = await generateAssistantTurn({
+			provider,
+			model: 'model-1',
+			temperature: 0.4,
+			maxTokens: 256,
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+			],
+			tools: [],
+			onTextDelta: async (delta, fullText) => {
+				updates.push({ delta, fullText })
+			},
+		})
+
+		expect(fetchMock).toHaveBeenCalledWith(
+			'https://example.com/v1/chat/completions',
+			expect.objectContaining({
+				method: 'POST',
+				headers: expect.objectContaining({
+					accept: 'text/event-stream',
+					authorization: 'Bearer key',
+				}),
+			}),
+		)
+		expect(
+			JSON.parse(fetchMock.mock.calls[0][1]?.body as string),
+		).toMatchObject({
+			model: 'model-1',
+			temperature: 0.4,
+			max_tokens: 256,
+			stream: true,
+		})
+		expect(transportMocks.obsidianFetch).not.toHaveBeenCalled()
+		expect(aiMocks.streamText).not.toHaveBeenCalled()
+		expect(aiMocks.generateText).not.toHaveBeenCalled()
+		expect(updates).toEqual([
+			{ delta: 'Direct ', fullText: 'Direct ' },
+			{
+				delta: 'stream answer',
+				fullText: 'Direct stream answer',
+			},
+		])
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Direct stream answer' }],
+		})
+	})
+
+	it('uses the Node streaming transport before browser fetch when available', async () => {
+		const responseListeners: Record<
+			string,
+			Array<(...args: any[]) => void>
+		> = {}
+		const requestWrite = vi.fn()
+		const requestEnd = vi.fn()
+		const requestSetTimeout = vi.fn()
+		const requestModule = {
+			request: vi.fn((_options, callback) => {
+				const response = {
+					statusCode: 200,
+					statusMessage: 'OK',
+					headers: { 'content-type': 'text/event-stream' },
+					on: vi.fn((event: string, listener: (...args: any[]) => void) => {
+						responseListeners[event] = responseListeners[event] || []
+						responseListeners[event].push(listener)
+						return response
+					}),
+					destroy: vi.fn(),
+				}
+				const request = {
+					on: vi.fn(() => request),
+					write: requestWrite,
+					end: vi.fn(() => {
+						requestEnd()
+						callback(response)
+						responseListeners.data?.forEach((listener) =>
+							listener(
+								new TextEncoder().encode(
+									'data: {"choices":[{"delta":{"content":"Node stream"}}]}\n\n',
+								),
+							),
+						)
+						responseListeners.end?.forEach((listener) => listener())
+					}),
+					destroy: vi.fn(),
+					setTimeout: requestSetTimeout,
+				}
+				return request
+			}),
+		}
+		vi.stubGlobal(
+			'require',
+			vi.fn((moduleName: string) => {
+				if (moduleName !== 'https') {
+					throw new Error(`Unexpected module: ${moduleName}`)
+				}
+				return requestModule
+			}),
 		)
 
 		const provider = createProvider()
@@ -106,6 +211,8 @@ describe('generateAssistantTurn', () => {
 		const result = await generateAssistantTurn({
 			provider,
 			model: 'model-1',
+			temperature: 0.3,
+			maxTokens: 128,
 			messages: [
 				{
 					role: 'user',
@@ -116,15 +223,27 @@ describe('generateAssistantTurn', () => {
 			onTextDelta: vi.fn(),
 		})
 
-		expect(transportMocks.obsidianFetch).toHaveBeenCalledWith(
-			'https://example.com/v1/chat/completions',
-			expect.any(Object),
+		expect(globalThis.fetch).not.toHaveBeenCalled()
+		expect(requestModule.request).toHaveBeenCalledWith(
+			expect.objectContaining({
+				protocol: 'https:',
+				hostname: 'example.com',
+				path: '/v1/chat/completions',
+				method: 'POST',
+			}),
+			expect.any(Function),
 		)
-		expect(aiMocks.streamText).not.toHaveBeenCalled()
-		expect(aiMocks.generateText).not.toHaveBeenCalled()
+		expect(JSON.parse(requestWrite.mock.calls[0][0])).toMatchObject({
+			model: 'model-1',
+			temperature: 0.3,
+			max_tokens: 128,
+			stream: true,
+		})
+		expect(requestEnd).toHaveBeenCalledTimes(1)
+		expect(requestSetTimeout).toHaveBeenCalled()
 		expect(result.message).toEqual({
 			role: 'assistant',
-			content: [{ type: 'text', text: 'Direct first answer' }],
+			content: [{ type: 'text', text: 'Node stream' }],
 		})
 	})
 
@@ -153,7 +272,10 @@ describe('generateAssistantTurn', () => {
 					role: 'user',
 					content: [
 						{ type: 'text', text: 'Describe this' },
-						{ type: 'image_url', image_url: { url: 'data:image/png;base64,A' } },
+						{
+							type: 'image_url',
+							image_url: { url: 'data:image/png;base64,A' },
+						},
 					],
 				},
 			],
@@ -220,8 +342,8 @@ describe('generateAssistantTurn', () => {
 				outputTokens: 2,
 				totalTokens: 5,
 			},
-			})
 		})
+	})
 
 	it('falls back when a streaming response never completes', async () => {
 		vi.useFakeTimers()
@@ -408,7 +530,18 @@ describe('generateAssistantTurn', () => {
 		})
 	})
 
-	it('uses the direct OpenAI-compatible request before SDK attempts', async () => {
+	it('uses the direct non-streaming request after streaming and SDK attempts fail', async () => {
+		vi.mocked(globalThis.fetch).mockRejectedValueOnce(
+			new Error('native stream unavailable'),
+		)
+		aiMocks.streamText.mockImplementationOnce(() => {
+			throw new Error('sdk stream failed')
+		})
+		aiMocks.generateText
+			.mockRejectedValueOnce(new Error('sdk generate failed'))
+			.mockRejectedValueOnce(new Error('sdk generate without tools failed'))
+			.mockRejectedValueOnce(new Error('sdk generate without params failed'))
+			.mockRejectedValueOnce(new Error('sdk minimal failed'))
 		transportMocks.obsidianFetch.mockResolvedValueOnce(
 			new Response(
 				JSON.stringify({
@@ -438,6 +571,8 @@ describe('generateAssistantTurn', () => {
 		const result = await generateAssistantTurn({
 			provider,
 			model: 'model-1',
+			temperature: 0.2,
+			maxTokens: 512,
 			messages: [
 				{
 					role: 'user',
@@ -458,7 +593,8 @@ describe('generateAssistantTurn', () => {
 			},
 		})
 
-		expect(aiMocks.generateText).not.toHaveBeenCalled()
+		expect(aiMocks.streamText).toHaveBeenCalledTimes(1)
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(4)
 		expect(transportMocks.obsidianFetch).toHaveBeenCalledWith(
 			'https://example.com/v1/chat/completions',
 			expect.objectContaining({
@@ -472,6 +608,8 @@ describe('generateAssistantTurn', () => {
 			JSON.parse(transportMocks.obsidianFetch.mock.calls[0][1].body),
 		).toMatchObject({
 			model: 'model-1',
+			temperature: 0.2,
+			max_tokens: 512,
 			messages: [
 				{
 					role: 'user',
@@ -518,15 +656,15 @@ describe('generateAssistantTurn', () => {
 		)
 		aiMocks.generateText.mockResolvedValueOnce({
 			text: 'Recovered after empty direct output',
-				toolCalls: [],
-				files: [],
-				usage: {
-					inputTokens: 2,
-					outputTokens: 3,
-					totalTokens: 5,
-				},
-				response: {},
-			})
+			toolCalls: [],
+			files: [],
+			usage: {
+				inputTokens: 2,
+				outputTokens: 3,
+				totalTokens: 5,
+			},
+			response: {},
+		})
 
 		const result = await generateAssistantTurn({
 			provider: createProvider(),
@@ -664,9 +802,7 @@ describe('generateAssistantTurn', () => {
 					choices: [
 						{
 							message: {
-								content: [
-									{ type: 'text', text: 'Raw fallback answer' },
-								],
+								content: [{ type: 'text', text: 'Raw fallback answer' }],
 							},
 						},
 					],

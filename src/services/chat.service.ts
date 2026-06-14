@@ -513,9 +513,11 @@ export default class ChatService {
 			runState: activeRuntime.runState,
 			pendingMessages: activeRuntime.pendingMessages.map((item) => ({
 				...item,
-				attachments: item.attachments?.map((attachment: ChatImageAttachment) => ({
-					...attachment,
-				})),
+				attachments: item.attachments?.map(
+					(attachment: ChatImageAttachment) => ({
+						...attachment,
+					}),
+				),
 			})),
 			canSend: true,
 			canCreateFragment: !!activeSession && activeRuntime.runState === 'idle',
@@ -772,7 +774,9 @@ export default class ChatService {
 		}
 		const provider = this.getProviderOrThrow(session)
 		const model = this.getModelOrThrow(provider, session)
-		const attachments = modelAcceptsImageAttachments(model) ? rawAttachments : []
+		const attachments = modelAcceptsImageAttachments(model)
+			? rawAttachments
+			: []
 		if (!normalizedText && attachments.length === 0) {
 			return
 		}
@@ -1448,7 +1452,10 @@ export default class ChatService {
 
 				const tools = this.createToolsForContext(session, 0, MAX_TASK_DEPTH)
 				const isImageModel = isImageGenerationModel(model)
-				const fragmentMessages = this.buildMessagesForFragment(fragment, session)
+				const fragmentMessages = this.buildMessagesForFragment(
+					fragment,
+					session,
+				)
 				const requestMessages = isImageModel
 					? fragmentMessages
 					: modelSupportsImageInput(model)
@@ -1554,6 +1561,7 @@ export default class ChatService {
 				const assistantToolCalls = getAssistantToolCalls(response.message)
 				if (!assistantToolCalls?.length) {
 					runtime.runState = 'idle'
+					this.notify()
 					if (runtime.pendingMessages.length > 0) {
 						continue
 					}
@@ -2457,7 +2465,10 @@ export default class ChatService {
 					return part
 				}
 				const image = normalizeImageContent(part.image_url.url, 'image/png')
-				const saved = await this.saveGeneratedImage(image.base64, image.mediaType)
+				const saved = await this.saveGeneratedImage(
+					image.base64,
+					image.mediaType,
+				)
 				return {
 					type: 'image_url' as const,
 					image_url: { url: saved.url },

@@ -41,6 +41,35 @@ interface GenerateTextAssistantTurnOptions {
 	minimalMessages?: boolean
 }
 
+interface DirectStreamRequestInit {
+	method: string
+	headers: Record<string, string>
+	body: string
+}
+
+interface NodeRequestModule {
+	request: (
+		options: Record<string, unknown>,
+		callback: (response: NodeIncomingMessage) => void,
+	) => NodeClientRequest
+}
+
+interface NodeClientRequest {
+	on: (event: string, listener: (...args: any[]) => void) => NodeClientRequest
+	write: (body: string) => void
+	end: () => void
+	destroy?: (error?: Error) => void
+	setTimeout?: (timeout: number, callback?: () => void) => void
+}
+
+interface NodeIncomingMessage {
+	statusCode?: number
+	statusMessage?: string
+	headers?: Record<string, string | string[] | undefined>
+	on: (event: string, listener: (...args: any[]) => void) => NodeIncomingMessage
+	destroy?: (error?: Error) => void
+}
+
 export interface GenerateAssistantTurnResult {
 	message: AIMessage
 	meta: AIMessageMeta
@@ -172,7 +201,9 @@ function toModelMessages(messages: AIMessage[]): ModelMessage[] {
 					],
 				}
 		}
-		throw new Error(`Unsupported AI message role: ${(message as AIMessage).role}`)
+		throw new Error(
+			`Unsupported AI message role: ${(message as AIMessage).role}`,
+		)
 	})
 }
 
@@ -250,7 +281,9 @@ function contentPartsFromRawContent(content: unknown): AIMessageContentPart[] {
 	return contentPartFromRawPart(content)
 }
 
-function extractRawAssistantContentParts(body: unknown): AIMessageContentPart[] {
+function extractRawAssistantContentParts(
+	body: unknown,
+): AIMessageContentPart[] {
 	if (!body || typeof body !== 'object') {
 		return []
 	}
@@ -297,8 +330,8 @@ function toAssistantMessage(
 				url: file.base64.startsWith('data:')
 					? file.base64
 					: `data:${file.mediaType};base64,${file.base64}`,
-				},
-			}))
+			},
+		}))
 	const rawParts = result.text
 		? []
 		: extractRawAssistantContentParts(result.response?.body)
@@ -473,14 +506,18 @@ export async function generateAssistantTurn(
 		request.provider,
 		request.model,
 	)
-	if (shouldTryDirectTextFirst(request, interleavedField)) {
-		try {
-			return await generateTextAssistantTurnDirect(request)
-		} catch {
-			// Fall through to SDK streaming and compatibility fallbacks.
-		}
-	}
 	if (request.onTextDelta && !interleavedField) {
+		if (shouldTryDirectTextFirst(request, interleavedField)) {
+			try {
+				return await withTimeout(
+					streamTextAssistantTurnDirect(request),
+					AI_REQUEST_TIMEOUT_MS,
+					'Direct streaming request timed out; trying SDK streaming fallback.',
+				)
+			} catch {
+				// Fall through to SDK streaming and compatibility fallbacks.
+			}
+		}
 		try {
 			return await withTimeout(
 				streamAssistantTurn(request),
@@ -489,6 +526,14 @@ export async function generateAssistantTurn(
 			)
 		} catch {
 			return generateTextAssistantTurnWithFallbacks(request, interleavedField)
+		}
+	}
+
+	if (shouldTryDirectTextFirst(request, interleavedField)) {
+		try {
+			return await generateTextAssistantTurnDirect(request)
+		} catch {
+			// Fall through to SDK compatibility fallbacks.
 		}
 	}
 
@@ -553,6 +598,31 @@ function createDirectTextMessages(messages: AIMessage[]) {
 		.filter((message) => message.content.trim().length > 0)
 }
 
+function createDirectTextRequestBody(
+	request: GenerateAssistantTurnRequest,
+	messages: ReturnType<typeof createDirectTextMessages>,
+	stream: boolean,
+) {
+	const body: Record<string, unknown> = {
+		model: request.model,
+		messages,
+		stream,
+	}
+	if (
+		typeof request.temperature === 'number' &&
+		Number.isFinite(request.temperature)
+	) {
+		body.temperature = request.temperature
+	}
+	if (
+		typeof request.maxTokens === 'number' &&
+		Number.isFinite(request.maxTokens)
+	) {
+		body.max_tokens = request.maxTokens
+	}
+	return body
+}
+
 async function generateTextAssistantTurnDirect(
 	request: GenerateAssistantTurnRequest,
 ): Promise<GenerateAssistantTurnResult> {
@@ -573,11 +643,9 @@ async function generateTextAssistantTurnDirect(
 						'content-type': 'application/json',
 						authorization: `Bearer ${request.provider.apiKey}`,
 					},
-					body: JSON.stringify({
-						model: request.model,
-						messages,
-						stream: false,
-					}),
+					body: JSON.stringify(
+						createDirectTextRequestBody(request, messages, false),
+					),
 				}),
 				AI_REQUEST_TIMEOUT_MS,
 				`Direct text request timed out: ${url}`,
@@ -620,9 +688,9 @@ async function generateTextAssistantTurnDirect(
 					modelName,
 					usage: body?.usage
 						? {
-						inputTokens: body?.usage?.prompt_tokens,
-						outputTokens: body?.usage?.completion_tokens,
-						totalTokens: body?.usage?.total_tokens,
+								inputTokens: body?.usage?.prompt_tokens,
+								outputTokens: body?.usage?.completion_tokens,
+								totalTokens: body?.usage?.total_tokens,
 							}
 						: undefined,
 				},
@@ -634,6 +702,326 @@ async function generateTextAssistantTurnDirect(
 	throw lastError instanceof Error
 		? lastError
 		: new Error('Direct text request failed.')
+}
+
+function getRuntimeRequire(): ((moduleName: string) => unknown) | undefined {
+	const candidate =
+		(globalThis as any).require || (globalThis as any).window?.require
+	return typeof candidate === 'function' ? candidate : undefined
+}
+
+function getNodeRequestModule(target: URL): NodeRequestModule | undefined {
+	const runtimeRequire = getRuntimeRequire()
+	if (!runtimeRequire) {
+		return undefined
+	}
+	try {
+		const moduleName = target.protocol === 'https:' ? 'https' : 'http'
+		const transport = runtimeRequire(moduleName) as Partial<NodeRequestModule>
+		return typeof transport?.request === 'function'
+			? (transport as NodeRequestModule)
+			: undefined
+	} catch {
+		return undefined
+	}
+}
+
+function toUint8Array(chunk: unknown) {
+	if (chunk instanceof Uint8Array) {
+		return chunk
+	}
+	if (chunk instanceof ArrayBuffer) {
+		return new Uint8Array(chunk)
+	}
+	if (ArrayBuffer.isView(chunk)) {
+		const view = chunk as ArrayBufferView
+		return new Uint8Array(view.buffer, view.byteOffset, view.byteLength)
+	}
+	return new TextEncoder().encode(String(chunk ?? ''))
+}
+
+function appendNodeResponseHeaders(
+	headers: Headers,
+	source?: Record<string, string | string[] | undefined>,
+) {
+	for (const [key, value] of Object.entries(source || {})) {
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				headers.append(key, item)
+			}
+		} else if (value !== undefined) {
+			headers.set(key, value)
+		}
+	}
+}
+
+function createNodeStreamingResponse(
+	url: string,
+	init: DirectStreamRequestInit,
+	transport: NodeRequestModule,
+): Promise<Response> {
+	const target = new URL(url)
+	const headers = {
+		...init.headers,
+		'content-length': String(new TextEncoder().encode(init.body).byteLength),
+	}
+
+	return new Promise((resolve, reject) => {
+		let settled = false
+		let nodeRequest: NodeClientRequest | undefined
+		const finishWithError = (error: unknown) => {
+			if (settled) {
+				return
+			}
+			settled = true
+			reject(error)
+		}
+
+		nodeRequest = transport.request(
+			{
+				protocol: target.protocol,
+				hostname: target.hostname,
+				port: target.port || undefined,
+				path: `${target.pathname}${target.search}`,
+				method: init.method,
+				headers,
+			},
+			(nodeResponse) => {
+				const responseHeaders = new Headers()
+				appendNodeResponseHeaders(responseHeaders, nodeResponse.headers)
+				const body = new ReadableStream<Uint8Array>({
+					start(controller) {
+						nodeResponse.on('data', (chunk) => {
+							controller.enqueue(toUint8Array(chunk))
+						})
+						nodeResponse.on('end', () => {
+							controller.close()
+						})
+						nodeResponse.on('error', (error) => {
+							controller.error(error)
+						})
+					},
+					cancel() {
+						nodeResponse.destroy?.()
+						nodeRequest?.destroy?.()
+					},
+				})
+
+				settled = true
+				resolve(
+					new Response(body, {
+						status: nodeResponse.statusCode || 200,
+						statusText: nodeResponse.statusMessage || '',
+						headers: responseHeaders,
+					}),
+				)
+			},
+		)
+		nodeRequest.on('error', finishWithError)
+		nodeRequest.setTimeout?.(AI_REQUEST_TIMEOUT_MS, () => {
+			nodeRequest?.destroy?.(new Error('Direct streaming request timed out.'))
+		})
+		nodeRequest.write(init.body)
+		nodeRequest.end()
+	})
+}
+
+async function createDirectStreamingResponse(
+	url: string,
+	init: DirectStreamRequestInit,
+) {
+	const target = new URL(url)
+	const nodeTransport = getNodeRequestModule(target)
+	if (nodeTransport) {
+		return createNodeStreamingResponse(url, init, nodeTransport)
+	}
+
+	const nativeFetch = globalThis.fetch?.bind(globalThis)
+	if (!nativeFetch) {
+		throw new Error('Native streaming transport is unavailable.')
+	}
+	return nativeFetch(url, {
+		method: init.method,
+		headers: init.headers,
+		body: init.body,
+	})
+}
+
+async function* readTextChunks(body: ReadableStream<Uint8Array>) {
+	const reader = body.getReader()
+	const decoder = new TextDecoder()
+	try {
+		while (true) {
+			const { done, value } = await reader.read()
+			if (done) {
+				break
+			}
+			if (value) {
+				yield decoder.decode(value, { stream: true })
+			}
+		}
+		const tail = decoder.decode()
+		if (tail) {
+			yield tail
+		}
+	} finally {
+		reader.releaseLock()
+	}
+}
+
+function extractTextFromDirectStreamPayload(payload: string) {
+	if (!payload || payload === '[DONE]') {
+		return { done: payload === '[DONE]', text: '' }
+	}
+	try {
+		const body = JSON.parse(payload)
+		const usage = body?.usage
+		let text = ''
+		if (typeof body?.delta === 'string') {
+			text += body.delta
+		}
+		if (typeof body?.output_text === 'string') {
+			text += body.output_text
+		}
+		if (Array.isArray(body?.choices)) {
+			for (const choice of body.choices) {
+				const delta = choice?.delta ?? choice?.message ?? choice
+				if (typeof delta?.content === 'string') {
+					text += delta.content
+				} else if (delta?.content !== undefined) {
+					text += contentPartsFromRawContent(delta.content)
+						.filter(
+							(part): part is Extract<AIMessageContentPart, { type: 'text' }> =>
+								part.type === 'text',
+						)
+						.map((part) => part.text)
+						.join('')
+				}
+				if (typeof choice?.text === 'string') {
+					text += choice.text
+				}
+			}
+		}
+		return { done: false, text, usage }
+	} catch {
+		return { done: false, text: '' }
+	}
+}
+
+async function streamTextAssistantTurnDirect(
+	request: GenerateAssistantTurnRequest,
+): Promise<GenerateAssistantTurnResult> {
+	const messages = createDirectTextMessages(request.messages)
+	if (messages.length === 0) {
+		throw new Error('Enter a message before generating a response.')
+	}
+
+	const modelName =
+		request.provider.models[request.model]?.name?.trim() || request.model
+	let lastError: unknown
+	for (const url of getOpenAIChatCompletionURLs(request.provider.api)) {
+		try {
+			const response = await createDirectStreamingResponse(url, {
+				method: 'POST',
+				headers: {
+					'content-type': 'application/json',
+					accept: 'text/event-stream',
+					authorization: `Bearer ${request.provider.apiKey}`,
+				},
+				body: JSON.stringify(
+					createDirectTextRequestBody(request, messages, true),
+				),
+			})
+			if (!response.ok) {
+				const body = await response.json().catch(() => undefined)
+				throw new Error(
+					typeof body?.error?.message === 'string'
+						? `${body.error.message} (${url})`
+						: `Direct streaming request failed: ${response.status} ${response.statusText}`,
+				)
+			}
+			if (!response.body) {
+				throw new Error('Direct streaming response did not include a body.')
+			}
+
+			let buffer = ''
+			let fullText = ''
+			let usage:
+				| {
+						prompt_tokens?: number
+						completion_tokens?: number
+						total_tokens?: number
+				  }
+				| undefined
+			for await (const chunk of readTextChunks(response.body)) {
+				buffer += chunk
+				const events = buffer.split(/\r?\n\r?\n/)
+				buffer = events.pop() || ''
+				for (const event of events) {
+					for (const line of event.split(/\r?\n/)) {
+						const trimmed = line.trim()
+						if (!trimmed.startsWith('data:')) {
+							continue
+						}
+						const parsed = extractTextFromDirectStreamPayload(
+							trimmed.slice('data:'.length).trim(),
+						)
+						if (parsed.usage) {
+							usage = parsed.usage
+						}
+						if (parsed.text) {
+							fullText += parsed.text
+							await request.onTextDelta?.(parsed.text, fullText)
+						}
+					}
+				}
+			}
+			if (buffer.trim()) {
+				for (const line of buffer.split(/\r?\n/)) {
+					const trimmed = line.trim()
+					if (!trimmed.startsWith('data:')) {
+						continue
+					}
+					const parsed = extractTextFromDirectStreamPayload(
+						trimmed.slice('data:'.length).trim(),
+					)
+					if (parsed.usage) {
+						usage = parsed.usage
+					}
+					if (parsed.text) {
+						fullText += parsed.text
+						await request.onTextDelta?.(parsed.text, fullText)
+					}
+				}
+			}
+
+			const message: AIMessage = {
+				role: 'assistant',
+				content: toTextParts(fullText) || [],
+			}
+			assertAssistantOutput(message)
+			return {
+				message,
+				meta: {
+					providerId: request.provider.id,
+					providerName: request.provider.name || 'OpenAI',
+					modelName,
+					usage: usage
+						? {
+								inputTokens: usage.prompt_tokens,
+								outputTokens: usage.completion_tokens,
+								totalTokens: usage.total_tokens,
+							}
+						: undefined,
+				},
+			}
+		} catch (error) {
+			lastError = error
+		}
+	}
+	throw lastError instanceof Error
+		? lastError
+		: new Error('Direct streaming request failed.')
 }
 
 async function generateTextAssistantTurn(
@@ -662,11 +1050,11 @@ async function generateTextAssistantTurn(
 			: {
 					temperature: request.temperature,
 					maxOutputTokens: request.maxTokens,
-			}),
-			experimental_include: {
-				responseBody: true,
-			},
-		})
+				}),
+		experimental_include: {
+			responseBody: true,
+		},
+	})
 
 	if (request.onTextDelta && result.text) {
 		await request.onTextDelta(result.text, result.text)
@@ -761,7 +1149,10 @@ export async function generateImageTurn(
 	)
 	const lastUserMessage = getLastUserMessage(request.messages)
 	const prompt = toImagePrompt(lastUserMessage)
-	if (!prompt || (typeof prompt === 'object' && !prompt.text && !prompt.images.length)) {
+	if (
+		!prompt ||
+		(typeof prompt === 'object' && !prompt.text && !prompt.images.length)
+	) {
 		throw new Error('Enter an image prompt before generating an image.')
 	}
 
