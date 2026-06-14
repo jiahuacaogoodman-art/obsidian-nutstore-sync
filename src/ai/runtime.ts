@@ -314,6 +314,25 @@ function toAssistantMessage(
 	return message
 }
 
+function hasAssistantOutput(message: AIMessage) {
+	if (message.role !== 'assistant') {
+		return true
+	}
+	const hasContent = (message.content || []).some((part) => {
+		if (part.type === 'text') {
+			return part.text.trim().length > 0
+		}
+		return true
+	})
+	return hasContent || !!message.tool_calls?.length
+}
+
+function assertAssistantOutput(message: AIMessage) {
+	if (!hasAssistantOutput(message)) {
+		throw new Error('No assistant output was generated.')
+	}
+}
+
 function toMeta(params: {
 	provider: AIProviderConfig
 	providerName: string
@@ -522,9 +541,7 @@ async function generateTextAssistantTurnDirect(
 				files: [],
 				response: { body },
 			})
-			if (!message.content?.length) {
-				throw new Error('No assistant output was generated.')
-			}
+			assertAssistantOutput(message)
 			if (request.onTextDelta) {
 				const text = (message.content || [])
 					.filter(
@@ -596,9 +613,11 @@ async function generateTextAssistantTurn(
 	if (request.onTextDelta && result.text) {
 		await request.onTextDelta(result.text, result.text)
 	}
+	const message = toAssistantMessage(result, interleavedField)
+	assertAssistantOutput(message)
 
 	return {
-		message: toAssistantMessage(result, interleavedField),
+		message,
 		meta: toMeta({
 			provider: request.provider,
 			providerName,
@@ -646,16 +665,19 @@ export async function streamAssistantTurn(
 		result.files,
 	])
 
+	const message = toAssistantMessage(
+		{
+			text,
+			toolCalls,
+			files,
+			response: response as LanguageModelResponseMetadata & { body?: unknown },
+		},
+		interleavedField,
+	)
+	assertAssistantOutput(message)
+
 	return {
-		message: toAssistantMessage(
-			{
-				text,
-				toolCalls,
-				files,
-				response: response as LanguageModelResponseMetadata & { body?: unknown },
-			},
-			interleavedField,
-		),
+		message,
 		meta: toMeta({
 			provider: request.provider,
 			providerName,

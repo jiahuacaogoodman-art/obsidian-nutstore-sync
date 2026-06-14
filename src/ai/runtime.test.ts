@@ -360,6 +360,60 @@ describe('generateAssistantTurn', () => {
 		})
 	})
 
+	it('treats empty SDK assistant output as failed and uses the direct fallback', async () => {
+		aiMocks.generateText
+			.mockResolvedValueOnce({
+				text: '',
+				toolCalls: [],
+				files: [],
+				usage: {
+					inputTokens: 2,
+					outputTokens: 0,
+					totalTokens: 2,
+				},
+				response: {},
+			})
+			.mockRejectedValueOnce(new Error('tools rejected'))
+			.mockRejectedValueOnce(new Error('params rejected'))
+			.mockRejectedValueOnce(new Error('minimal sdk rejected'))
+		transportMocks.obsidianFetch.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					choices: [
+						{
+							message: {
+								content: 'Recovered after empty SDK output',
+							},
+						},
+					],
+				}),
+				{
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				},
+			),
+		)
+
+		const result = await generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+			],
+			tools: [],
+		})
+
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(4)
+		expect(transportMocks.obsidianFetch).toHaveBeenCalledTimes(1)
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Recovered after empty SDK output' }],
+		})
+	})
+
 	it('passes text and reference images to image generation models', async () => {
 		aiMocks.generateImage.mockResolvedValueOnce({
 			image: {
