@@ -5,7 +5,7 @@
 	cursor: not-allowed;
 }
 
-@keyframes nutstore-sync-spin {
+@keyframes guozha-ai-pro-spin {
 	from {
 		transform: rotate(0deg);
 	}
@@ -14,8 +14,9 @@
 	}
 }
 
+.guozha-ai-pro-spinning,
 .nutstore-sync-spinning {
-	animation: nutstore-sync-spin 2s linear infinite;
+	animation: guozha-ai-pro-spin 2s linear infinite;
 }
 
 .conflict.ours,

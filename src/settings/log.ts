@@ -42,10 +42,10 @@ export default class LogSettings extends BaseSettings {
 	async saveLogsToNote() {
 		try {
 			const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-			const fileName = `nutstore-logs-${timestamp}.md`
-			const dirPath = 'nutstore-sync/logs'
+			const fileName = `guozha-ai-pro-logs-${timestamp}.md`
+			const dirPath = 'guozha-ai-pro/logs'
 			const filePath = `${dirPath}/${fileName}`
-			const content = `# Nutstore Plugin Logs\n\nGenerated at: ${new Date().toLocaleString()}\n\n---\n\n${this.logs}`
+			const content = `# 果札：AI pro Logs\n\nGenerated at: ${new Date().toLocaleString()}\n\n---\n\n${this.logs}`
 
 			// 确保目录存在
 			const folderExists = await this.app.vault.adapter.exists(dirPath)

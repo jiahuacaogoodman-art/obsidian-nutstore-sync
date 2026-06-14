@@ -26,7 +26,7 @@ import type {
 export type AppProps = ChatboxProps
 
 const DESKTOP_RESIZE_MEDIA_QUERY = '(pointer: fine) and (min-width: 1024px)'
-const INPUT_HEIGHT_STORAGE_KEY = 'nutstore-sync.chatbox.desktop-input-height'
+const INPUT_HEIGHT_STORAGE_KEY = 'guozha-ai-pro.chatbox.desktop-input-height'
 const DEFAULT_DESKTOP_INPUT_HEIGHT = 184
 const DESKTOP_INPUT_MIN_HEIGHT = 120
 const DESKTOP_INPUT_ABSOLUTE_MIN_HEIGHT = 72
@@ -315,7 +315,8 @@ function App(props: AppProps) {
 					url: reader.result,
 				})
 			}
-			reader.onerror = () => reject(reader.error || new Error(t('imageReadFailed')))
+			reader.onerror = () =>
+				reject(reader.error || new Error(t('imageReadFailed')))
 			reader.readAsDataURL(file)
 		})
 	}

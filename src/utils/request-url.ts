@@ -24,7 +24,7 @@ const getDevice = () => {
 	return 'Unknown'
 }
 
-const USER_AGENT = `Obsidian (${getOS()}; ${getDevice()}; ObsidianNutstoreSync/${PLUGIN_VERSION})`
+const USER_AGENT = `Obsidian (${getOS()}; ${getDevice()}; GuozhaAIPro/${PLUGIN_VERSION})`
 
 class RequestUrlError extends Error {
 	constructor(public res: RequestUrlResponse) {

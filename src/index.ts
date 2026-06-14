@@ -7,7 +7,7 @@ import './webdav-patch'
 import './assets/styles/global.css'
 
 import { toBase64 } from 'js-base64'
-import { normalizePath, Notice, Plugin } from 'obsidian'
+import { normalizePath, Notice, ObsidianProtocolData, Plugin } from 'obsidian'
 import { sanitizeDefaultSelections, sanitizeProviders } from './ai/config'
 import { SyncRibbonManager } from './components/SyncRibbonManager'
 import { emitCancelSync } from './events'
@@ -66,16 +66,17 @@ export default class NutstorePlugin extends Plugin {
 		this.addSettingTab(new NutstoreSettingTab(this.app, this))
 		this.registerView(CHATBOX_VIEW_TYPE, (leaf) => new ChatboxView(leaf, this))
 
-		this.registerObsidianProtocolHandler('nutstore-sync/sso', async (data) => {
-			if (data?.s) {
-				this.settings.oauthResponseText = data.s
+		const handleSsoCallback = async (data: ObsidianProtocolData) => {
+			const token = data.s
+			if (typeof token === 'string') {
+				this.settings.oauthResponseText = token
 				await this.saveSettings()
 				new Notice(i18n.t('settings.login.success'), 5000)
+				emitSsoReceive({ token })
 			}
-			emitSsoReceive({
-				token: data?.s,
-			})
-		})
+		}
+		this.registerObsidianProtocolHandler('guozha-ai-pro/sso', handleSsoCallback)
+		this.registerObsidianProtocolHandler('nutstore-sync/sso', handleSsoCallback)
 		setPluginInstance(this)
 		await this.chatService.handleSettingsChanged()
 

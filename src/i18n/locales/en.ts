@@ -283,14 +283,14 @@ export default {
 			dump: 'Export',
 			dumpName: 'Cache management',
 			dumpDesc:
-				'The plugin stores remote folder information locally. When switching devices, this data is lost and must be rebuilt before syncing. With many files, rebuilding can be slow due to rate limits. Export saves this data to Nutstore; Import retrieves it, allowing immediate syncing on new devices.',
+				'The plugin stores remote folder information locally. When switching devices, this data is lost and must be rebuilt before syncing. With many files, rebuilding can be slow due to rate limits. Export saves this data to the remote directory; Import retrieves it, allowing immediate syncing on new devices.',
 			restoreName: 'Import cache',
 			restoreDesc:
-				'Import previously exported cache data from Nutstore to your device. This lets you sync immediately on a new device without the long waiting time normally needed to scan all your files.',
+				'Import previously exported cache data from the remote directory to your device. This lets you sync immediately on a new device without the long waiting time normally needed to scan all your files.',
 			restore: 'Import',
 			clearName: 'Clear local cache',
 			clearDesc:
-				'Delete local cache data stored on this device only. This action cannot be undone and will require rebuilding the cache before the next sync. Your Nutstore data remains intact.',
+				'Delete local cache data stored on this device only. This action cannot be undone and will require rebuilding the cache before the next sync. Your remote data remains intact.',
 			clear: 'Clear',
 			confirm: 'Confirm clear',
 			cleared: 'Cache cleared successfully',
@@ -393,7 +393,7 @@ export default {
 			requestsTooFrequent:
 				'Requests too frequent, please wait a few minutes and try again',
 			accountNotConfigured:
-				'Nutstore account not configured. Please configure your account in settings first.',
+				'Sync account not configured. Please configure your account in settings first.',
 		},
 		requestsTooFrequent:
 			'Requests too frequent, plugin will resume sync at {{time}}',
@@ -421,7 +421,7 @@ export default {
 		failedStatus: 'Sync failed',
 		cancelled: 'Sync cancelled',
 		suggestUseClientForManyTasks:
-			'Tip: When there are many sync tasks, we recommend using the Nutstore client for better performance and stability. The plugin is more suitable for mobile use!',
+			'Tip: When there are many sync tasks, we recommend using a desktop sync client for better performance and stability. The plugin is more suitable for mobile use!',
 		modalTitle: 'Syncing',
 		cancelButton: 'Cancel sync',
 		progressText: 'Syncing files',
@@ -498,8 +498,8 @@ export default {
 		longAgo: 'long ago',
 	},
 	chatbox: {
-		title: 'Chatbox',
-		openCommand: 'Open chatbox',
+		title: 'Guozha: AI pro',
+		openCommand: 'Open Guozha: AI pro',
 		newChat: 'New chat',
 		sessionDeleted: 'Session deleted',
 		repeatedToolCallsStopped:
