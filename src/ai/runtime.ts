@@ -289,17 +289,28 @@ export function assertProviderUsable(provider: AIProviderConfig) {
 export async function generateAssistantTurn(
 	request: GenerateAssistantTurnRequest,
 ): Promise<GenerateAssistantTurnResult> {
-	const resolver = getProviderResolver(request.provider)
-	const modelName =
-		request.provider.models[request.model]?.name?.trim() || request.model
 	const interleavedField = getInterleavedMessageField(
 		request.provider,
 		request.model,
 	)
 	if (request.onTextDelta && !interleavedField) {
-		return streamAssistantTurn(request)
+		try {
+			return await streamAssistantTurn(request)
+		} catch {
+			return generateTextAssistantTurn(request, interleavedField)
+		}
 	}
 
+	return generateTextAssistantTurn(request, interleavedField)
+}
+
+async function generateTextAssistantTurn(
+	request: GenerateAssistantTurnRequest,
+	interleavedField?: string,
+): Promise<GenerateAssistantTurnResult> {
+	const resolver = getProviderResolver(request.provider)
+	const modelName =
+		request.provider.models[request.model]?.name?.trim() || request.model
 	const { model, providerName } = resolver.createLanguageModel(
 		request.provider as never,
 		request.model,

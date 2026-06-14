@@ -266,6 +266,24 @@ function isImageGenerationModel(model: {
 	)
 }
 
+function removeEmptyAssistantPlaceholders(fragment: ChatFragment) {
+	const initialLength = fragment.messages.length
+	fragment.messages = fragment.messages.filter((record) => {
+		if (record.isError || record.message.role !== 'assistant') {
+			return true
+		}
+		const hasContent = (record.message.content || []).some((part) => {
+			if (part.type === 'text') {
+				return part.text.length > 0
+			}
+			return true
+		})
+		const hasToolCalls = !!record.message.tool_calls?.length
+		return hasContent || hasToolCalls
+	})
+	return fragment.messages.length !== initialLength
+}
+
 function createTimestampSlug() {
 	const date = new Date()
 	const pad = (value: number) => String(value).padStart(2, '0')
@@ -1503,7 +1521,10 @@ export default class ChatService {
 				const assistantToolCalls = getAssistantToolCalls(response.message)
 				if (!assistantToolCalls?.length) {
 					runtime.runState = 'idle'
-					continue
+					if (runtime.pendingMessages.length > 0) {
+						continue
+					}
+					return
 				}
 
 				repeatState = updateToolCallRepeatState(repeatState, assistantToolCalls)
@@ -1566,6 +1587,11 @@ export default class ChatService {
 				session.model?.providerId,
 			)
 			const activeModel = getModelById(activeProvider, session.model?.modelId)
+			const fragment = this.getActiveFragment(session)
+			if (removeEmptyAssistantPlaceholders(fragment)) {
+				fragment.updatedAt = Date.now()
+				session.updatedAt = Date.now()
+			}
 			this.reportFatalError(
 				session,
 				error instanceof Error
@@ -1577,7 +1603,7 @@ export default class ChatService {
 					modelId: activeModel?.id,
 					modelName: activeModel?.name,
 				},
-				this.getActiveFragment(session),
+				fragment,
 			)
 			runtime.runState = 'idle'
 			await this.persistSession(session)

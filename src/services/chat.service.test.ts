@@ -380,6 +380,28 @@ describe('ChatService fragment workflows', () => {
 		expect(service.getViewProps().pendingMessages).toHaveLength(0)
 	})
 
+	it('removes the empty streaming placeholder when generation fails', async () => {
+		generateAssistantTurn.mockRejectedValueOnce(
+			new Error('No output generated. Check the stream for errors.'),
+		)
+
+		const service = new ChatService(createPlugin() as never)
+		await service.ensureSession()
+		await service.sendMessage('Hello')
+
+		const session = getActiveSession(service)
+		const fragment = session.fragments[0]
+		expect(service.getViewProps().runState).toBe('idle')
+		expect(fragment.messages).toHaveLength(2)
+		expect(fragment.messages[0].message.role).toBe('user')
+		expect(fragment.messages[1].message.role).toBe('assistant')
+		expect(fragment.messages[1].isError).toBe(true)
+		expect(fragment.messages[1].message.content?.[0]).toEqual({
+			type: 'text',
+			text: 'No output generated. Check the stream for errors.',
+		})
+	})
+
 	it('stores image attachments and omits them for text-only models', async () => {
 		generateAssistantTurn.mockResolvedValueOnce({
 			message: {
