@@ -408,6 +408,26 @@ function getLastUserMessage(messages: AIMessage[]) {
 	return undefined
 }
 
+function getLastMessage(messages: AIMessage[]) {
+	return messages[messages.length - 1]
+}
+
+function hasImageParts(message: AIMessage | undefined) {
+	return !!message?.content?.some((part) => part.type === 'image_url')
+}
+
+function shouldTryDirectTextFirst(
+	request: GenerateAssistantTurnRequest,
+	interleavedField?: string,
+) {
+	const lastMessage = getLastMessage(request.messages)
+	return (
+		!interleavedField &&
+		lastMessage?.role === 'user' &&
+		!hasImageParts(lastMessage)
+	)
+}
+
 function toMinimalMessages(messages: AIMessage[]) {
 	const lastUserMessage = getLastUserMessage(messages)
 	return lastUserMessage ? [lastUserMessage] : messages
@@ -453,6 +473,13 @@ export async function generateAssistantTurn(
 		request.provider,
 		request.model,
 	)
+	if (shouldTryDirectTextFirst(request, interleavedField)) {
+		try {
+			return await generateTextAssistantTurnDirect(request)
+		} catch {
+			// Fall through to SDK streaming and compatibility fallbacks.
+		}
+	}
 	if (request.onTextDelta && !interleavedField) {
 		try {
 			return await withTimeout(

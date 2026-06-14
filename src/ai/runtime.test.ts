@@ -82,6 +82,93 @@ describe('generateAssistantTurn', () => {
 		transportMocks.obsidianFetch.mockReset()
 	})
 
+	it('uses the direct OpenAI-compatible request first for plain user text', async () => {
+		transportMocks.obsidianFetch.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({
+					choices: [
+						{
+							message: {
+								content: 'Direct first answer',
+							},
+						},
+					],
+				}),
+				{
+					status: 200,
+					headers: { 'content-type': 'application/json' },
+				},
+			),
+		)
+
+		const provider = createProvider()
+		provider.api = 'https://example.com'
+		const result = await generateAssistantTurn({
+			provider,
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [{ type: 'text', text: 'Hello' }],
+				},
+			],
+			tools: [],
+			onTextDelta: vi.fn(),
+		})
+
+		expect(transportMocks.obsidianFetch).toHaveBeenCalledWith(
+			'https://example.com/v1/chat/completions',
+			expect.any(Object),
+		)
+		expect(aiMocks.streamText).not.toHaveBeenCalled()
+		expect(aiMocks.generateText).not.toHaveBeenCalled()
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Direct first answer' }],
+		})
+	})
+
+	it('keeps image user messages on the SDK path', async () => {
+		aiMocks.streamText.mockReturnValueOnce({
+			textStream: (async function* () {
+				yield 'Image '
+				yield 'answer'
+			})(),
+			text: Promise.resolve('Image answer'),
+			toolCalls: Promise.resolve([]),
+			usage: Promise.resolve({
+				inputTokens: 3,
+				outputTokens: 2,
+				totalTokens: 5,
+			}),
+			response: Promise.resolve({}),
+			files: Promise.resolve([]),
+		})
+
+		const result = await generateAssistantTurn({
+			provider: createProvider(),
+			model: 'model-1',
+			messages: [
+				{
+					role: 'user',
+					content: [
+						{ type: 'text', text: 'Describe this' },
+						{ type: 'image_url', image_url: { url: 'data:image/png;base64,A' } },
+					],
+				},
+			],
+			tools: [],
+			onTextDelta: vi.fn(),
+		})
+
+		expect(transportMocks.obsidianFetch).not.toHaveBeenCalled()
+		expect(aiMocks.streamText).toHaveBeenCalledTimes(1)
+		expect(result.message).toEqual({
+			role: 'assistant',
+			content: [{ type: 'text', text: 'Image answer' }],
+		})
+	})
+
 	it('falls back to non-streaming text generation when the stream fails', async () => {
 		aiMocks.streamText.mockReturnValueOnce({
 			textStream: (async function* () {
@@ -321,12 +408,7 @@ describe('generateAssistantTurn', () => {
 		})
 	})
 
-	it('falls back to a direct OpenAI-compatible request when SDK attempts fail', async () => {
-		aiMocks.generateText
-			.mockRejectedValueOnce(new Error('full context rejected'))
-			.mockRejectedValueOnce(new Error('tools rejected'))
-			.mockRejectedValueOnce(new Error('params rejected'))
-			.mockRejectedValueOnce(new Error('minimal sdk rejected'))
+	it('uses the direct OpenAI-compatible request before SDK attempts', async () => {
 		transportMocks.obsidianFetch.mockResolvedValueOnce(
 			new Response(
 				JSON.stringify({
@@ -376,7 +458,7 @@ describe('generateAssistantTurn', () => {
 			},
 		})
 
-		expect(aiMocks.generateText).toHaveBeenCalledTimes(4)
+		expect(aiMocks.generateText).not.toHaveBeenCalled()
 		expect(transportMocks.obsidianFetch).toHaveBeenCalledWith(
 			'https://example.com/v1/chat/completions',
 			expect.objectContaining({
@@ -416,29 +498,14 @@ describe('generateAssistantTurn', () => {
 		})
 	})
 
-	it('treats empty SDK assistant output as failed and uses the direct fallback', async () => {
-		aiMocks.generateText
-			.mockResolvedValueOnce({
-				text: '',
-				toolCalls: [],
-				files: [],
-				usage: {
-					inputTokens: 2,
-					outputTokens: 0,
-					totalTokens: 2,
-				},
-				response: {},
-			})
-			.mockRejectedValueOnce(new Error('tools rejected'))
-			.mockRejectedValueOnce(new Error('params rejected'))
-			.mockRejectedValueOnce(new Error('minimal sdk rejected'))
+	it('falls back to SDK attempts when direct output is empty', async () => {
 		transportMocks.obsidianFetch.mockResolvedValueOnce(
 			new Response(
 				JSON.stringify({
 					choices: [
 						{
 							message: {
-								content: 'Recovered after empty SDK output',
+								content: '',
 							},
 						},
 					],
@@ -449,6 +516,17 @@ describe('generateAssistantTurn', () => {
 				},
 			),
 		)
+		aiMocks.generateText.mockResolvedValueOnce({
+			text: 'Recovered after empty direct output',
+				toolCalls: [],
+				files: [],
+				usage: {
+					inputTokens: 2,
+					outputTokens: 3,
+					totalTokens: 5,
+				},
+				response: {},
+			})
 
 		const result = await generateAssistantTurn({
 			provider: createProvider(),
@@ -462,11 +540,11 @@ describe('generateAssistantTurn', () => {
 			tools: [],
 		})
 
-		expect(aiMocks.generateText).toHaveBeenCalledTimes(4)
 		expect(transportMocks.obsidianFetch).toHaveBeenCalledTimes(1)
+		expect(aiMocks.generateText).toHaveBeenCalledTimes(1)
 		expect(result.message).toEqual({
 			role: 'assistant',
-			content: [{ type: 'text', text: 'Recovered after empty SDK output' }],
+			content: [{ type: 'text', text: 'Recovered after empty direct output' }],
 		})
 	})
 
